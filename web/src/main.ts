@@ -401,7 +401,7 @@ async function runOnline(event: SubmitEvent): Promise<void> {
                     const fileLimit = Number(element<HTMLInputElement>('intelx-file-limit').value);
                     result = { ...await lookupIntelX(job.target, query, signal, Math.min(25, Math.max(1, Number.isInteger(fileLimit) ? fileLimit : 10))), query };
                 } else {
-                    const response = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target: job.target, query, provider: job.provider.id, hidePasswords: true, page: 1 }), signal, credentials: 'omit', cache: 'no-store' });
+                    const response = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target: job.target, query, provider: job.provider.id, hidePasswords: false, page: 1 }), signal, credentials: 'omit', cache: 'no-store' });
                     const payload: unknown = await response.json();
                     if (!response.ok) throw new Error(errorMessage(payload, `Lookup failed (HTTP ${response.status}).`));
                     result = parseSearchResult(payload, job.target, job.provider.name);
@@ -526,7 +526,7 @@ async function loadNextPage(index: number, expected: SearchResult, button: HTMLB
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target: expected.target, query: expected.query, provider: provider.id,
-                hidePasswords: true, page: (expected.page ?? 1) + 1 }),
+                hidePasswords: false, page: (expected.page ?? 1) + 1 }),
             signal: controller.signal, credentials: 'omit', cache: 'no-store',
         });
         const payload: unknown = await response.json();

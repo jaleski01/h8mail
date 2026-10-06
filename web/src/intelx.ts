@@ -49,7 +49,7 @@ export async function lookupIntelX(target: string, query: string, outerSignal: A
                 if (seenFiles.has(file.systemId)) continue;
                 if (seenFiles.size >= maxFiles) { truncated = true; break; }
                 seenFiles.add(file.systemId);
-                const read = await request('read', { systemId: file.systemId, bucket: file.bucket, name: file.name, target, query, hidePasswords: true });
+                const read = await request('read', { systemId: file.systemId, bucket: file.bucket, name: file.name, target, query, hidePasswords: false });
                 if (!Array.isArray(read.records) || !['found', 'not_found', 'error'].includes(String(read.status))) throw new Error('IntelX returned malformed file contents.');
                 if (read.status === 'error') throw new Error(object(read.error) && typeof read.error.message === 'string' ? read.error.message : 'IntelX could not read a search result.');
                 for (const record of read.records as unknown[]) {

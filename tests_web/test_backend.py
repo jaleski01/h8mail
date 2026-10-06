@@ -261,7 +261,7 @@ class EngineTests(unittest.TestCase):
 
     def test_pwned_password_lookup_never_sends_the_full_password(self):
         request = validate_request(public_search_payload(
-            "pwnedpasswords", query="password", target="password",
+            "pwnedpasswords", query="password", target="password", hidePasswords=False,
         ))
         worker_payload = request.to_dict()
         worker_credentials = worker_payload.pop("credentials")
@@ -284,6 +284,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(response["status"], "found")
         self.assertEqual(response["records"][0]["value"], "3")
         self.assertEqual(response["target"], "[hidden]")
+        self.assertNotIn('"target":"password"', json.dumps(response))
         self.assertIn("only a padded SHA-1 prefix", response["notice"])
 
     def test_pwned_password_lookup_reports_absent_password_without_echoing_it(self):

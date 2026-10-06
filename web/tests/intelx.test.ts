@@ -14,15 +14,16 @@ test('IntelX starts once, reads returned files, then terminates the search', asy
         const bodies: Record<string, unknown> = {
             start: { searchId: 'search-1', status: 'started' },
             results: { status: 'complete', records: [{ systemId: 'file-1', bucket: 'leaks.public', name: 'records.txt' }], truncated: false },
-            read: { status: 'found', records: [{ source: 'records.txt', field: 'line', value: '[hidden]' }] },
+            read: { status: 'found', records: [{ source: 'records.txt', field: 'line', value: 'password:synthetic-secret' }] },
             terminate: { status: 'terminated' },
         };
-        if (payload.operation === 'read') assert.equal(payload.hidePasswords, true);
+        if (payload.operation === 'read') assert.equal(payload.hidePasswords, false);
         return new Response(JSON.stringify(bodies[String(payload.operation)]), { status: 200 });
     };
     const result = await lookupIntelX('person@example.org', 'email', new AbortController().signal);
     assert.equal(result.status, 'found');
     assert.equal(result.records.length, 1);
+    assert.equal(result.records[0]?.value, 'password:synthetic-secret');
     assert.deepEqual(operations, ['start', 'results', 'read', 'terminate']);
 });
 

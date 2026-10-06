@@ -115,7 +115,7 @@ def result(request: SearchRequest, records: list[dict[str, str]], count: int,
     from .errors import public_error
 
     response = {
-        "target": "[hidden]" if request.query == "password" and request.hidePasswords else request.target,
+        "target": "[hidden]" if request.query == "password" else request.target,
         "query": request.query, "provider": request.provider,
         "status": "error" if error_code else "found" if count else "not_found",
         "records": records, "count": count, "page": request.page, "hasMore": False, **metadata,

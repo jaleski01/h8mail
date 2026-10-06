@@ -153,6 +153,7 @@ h3 { font-size: 15px; font-weight: 400; line-height: 1.4; letter-spacing: -.01em
 .export-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 20px; }
 .checkbox-label { display: inline-flex; align-items: center; gap: 9px; color: var(--muted); font-size: 10px; cursor: pointer; }
 .checkbox-label input { width: 13px; height: 13px; accent-color: var(--accent); margin: 0; }
+.sensitive-hint { max-width: 310px; margin: 0; text-align: right; }
 .result-content { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .empty-state { display: flex; align-items: center; gap: 30px; padding: 31px 24px; min-height: 148px; }
 .empty-symbol { font-size: 46px; line-height: 1; font-family: Georgia, serif; color: #44433e; }
@@ -294,6 +295,7 @@ h3 { font-size: 15px; font-weight: 400; line-height: 1.4; letter-spacing: -.01em
     .results-heading { display: block; margin-bottom: 20px; }
     .results-heading h2 { font-size: 21px; }
     .export-controls { align-items: flex-start; margin-top: 20px; }
+    .sensitive-hint { text-align: left; }
     .export-actions { gap: 20px; margin-top: 6px; }
     .empty-state { padding: 26px 12px; gap: 18px; }
     .empty-symbol { font-size: 39px; }
