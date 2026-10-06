@@ -10,7 +10,6 @@
         },
         "backend": {
             "root": ".",
-            "runtime": "python",
             "entrypoint": "api.index:app",
             "functions": {
                 "api/index.py": {
