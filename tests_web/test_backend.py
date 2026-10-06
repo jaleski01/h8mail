@@ -1,6 +1,7 @@
 """Offline boundary and regression tests; never send personal data to providers."""
 
 from contextlib import redirect_stderr
+import hashlib
 import http.client
 from http.server import ThreadingHTTPServer
 import io
@@ -265,10 +266,13 @@ class EngineTests(unittest.TestCase):
         worker_payload = request.to_dict()
         worker_credentials = worker_payload.pop("credentials")
         self.assertEqual(validate_request(worker_payload, worker_credentials), request)
-        response, calls = self.run_provider(request, [SyntheticResponse(raw=(
-            b"1E4C9B93F3F0682250B6CF8331B7EE68FD8:3\r\n"
-            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:0\r\n"
-        ))])
+        with patch("web_adapter.engine.hashlib.sha1", wraps=hashlib.sha1) as sha1:
+            response, calls = self.run_provider(request, [SyntheticResponse(raw=(
+                b"1E4C9B93F3F0682250B6CF8331B7EE68FD8:3\r\n"
+                b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:0\r\n"
+            ))])
+        self.assertEqual(len(sha1.call_args_list), 2)
+        self.assertTrue(all(call.kwargs["usedforsecurity"] is False for call in sha1.call_args_list))
         url = calls.call_args.args[1]
         self.assertEqual(url, "https://api.pwnedpasswords.com/range/5BAA6")
         self.assertEqual(calls.call_args.kwargs["headers"]["Add-Padding"], "true")

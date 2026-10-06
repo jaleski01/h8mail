@@ -64,6 +64,11 @@ def nonnegative_integer(value: object) -> int:
     return value
 
 
+def hibp_password_hash(password: str) -> str:
+    """Use HIBP's SHA-1 lookup protocol without treating it as cryptography."""
+    return hashlib.sha1(password.encode("utf-8"), usedforsecurity=False).hexdigest().upper()
+
+
 def record(source: str, field: str, value: object, request: SearchRequest) -> dict[str, str]:
     require(isinstance(source, str) and isinstance(field, str)
             and isinstance(value, (str, int, float, bool)))
@@ -120,7 +125,7 @@ def invoke(request: SearchRequest, target: WebTarget, transport: Transport) -> N
             transport.request("https://api.hunter.io/v2/email-insight", "GET", target.headers,
                               params={"email": request.target})
     elif request.provider == "pwnedpasswords":
-        digest = hashlib.sha1(request.target.encode("utf-8")).hexdigest().upper()
+        digest = hibp_password_hash(request.target)
         transport.request(
             f"https://api.pwnedpasswords.com/range/{digest[:5]}", "GET",
             {**target.headers, "User-Agent": "h8mail-web-adapter", "Add-Padding": "true"}, raw=True,
@@ -247,7 +252,7 @@ def normalize(request: SearchRequest, transport: Transport) -> dict:
             metadata["notice"] = "Free Email Insight signals only; this result does not search breach records."
     elif request.provider == "pwnedpasswords":
         require(isinstance(payload, bytes))
-        digest = hashlib.sha1(request.target.encode("utf-8")).hexdigest().upper()
+        digest = hibp_password_hash(request.target)
         suffix_to_find = digest[5:]
         try:
             lines = payload.decode("ascii").splitlines()
