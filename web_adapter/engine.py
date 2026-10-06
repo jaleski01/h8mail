@@ -1,6 +1,8 @@
 """Run upstream methods in isolation and normalize validated provider responses."""
 
 import contextlib
+import hashlib
+import re
 from urllib.parse import quote
 
 import requests
@@ -109,10 +111,20 @@ def invoke(request: SearchRequest, target: WebTarget, transport: Transport) -> N
         target.target = quote(request.target, safe="")
         target.get_emailrepio(api_key)
     elif request.provider == "hunter":
-        domain = request.target.rsplit("@", 1)[-1]
-        transport.request("https://api.hunter.io/v2/domain-search", "GET", target.headers,
-                          params={"domain": domain, "api_key": api_key, "limit": 10,
-                                  "offset": (request.page - 1) * 10})
+        if api_key:
+            domain = request.target.rsplit("@", 1)[-1]
+            transport.request("https://api.hunter.io/v2/domain-search", "GET", target.headers,
+                              params={"domain": domain, "api_key": api_key, "limit": 10,
+                                      "offset": (request.page - 1) * 10})
+        else:
+            transport.request("https://api.hunter.io/v2/email-insight", "GET", target.headers,
+                              params={"email": request.target})
+    elif request.provider == "pwnedpasswords":
+        digest = hashlib.sha1(request.target.encode("utf-8")).hexdigest().upper()
+        transport.request(
+            f"https://api.pwnedpasswords.com/range/{digest[:5]}", "GET",
+            {**target.headers, "User-Agent": "h8mail-web-adapter", "Add-Padding": "true"}, raw=True,
+        )
     elif request.provider == "leaklookup":
         # Use the public method for email to avoid legacy private-field parsing bugs.
         if request.query == "email":
@@ -209,16 +221,50 @@ def normalize(request: SearchRequest, transport: Transport) -> dict:
     elif request.provider == "hunter":
         require(isinstance(payload, dict) and isinstance(payload.get("data"), dict))
         hunter_data = payload["data"]
-        require(isinstance(hunter_data.get("emails"), list)
-                and isinstance(payload.get("meta"), dict))
-        for email in hunter_data["emails"]:
-            require(isinstance(email, dict) and isinstance(email.get("value"), str))
-            if len(records) < MAX_RECORDS:
-                records.append(record("HUNTER", "related_email", email["value"], request))
-        count = nonnegative_integer(payload["meta"].get("results"))
-        has_more = bool(hunter_data["emails"]) and request.page * 10 < count
-        truncated = count > 10_000
-        metadata.update({"total": count, "hasMore": has_more, "truncated": truncated})
+        if request.credentials["apiKey"]:
+            require(isinstance(hunter_data.get("emails"), list)
+                    and isinstance(payload.get("meta"), dict))
+            for email in hunter_data["emails"]:
+                require(isinstance(email, dict) and isinstance(email.get("value"), str))
+                if len(records) < MAX_RECORDS:
+                    records.append(record("HUNTER", "related_email", email["value"], request))
+            count = nonnegative_integer(payload["meta"].get("results"))
+            has_more = bool(hunter_data["emails"]) and request.page * 10 < count
+            truncated = count > 10_000
+            metadata.update({"total": count, "hasMore": has_more, "truncated": truncated})
+        else:
+            returned_email = hunter_data.get("email")
+            require(isinstance(returned_email, str)
+                    and returned_email.casefold() == request.target.casefold())
+            for field in ("gibberish", "pattern", "mx_records", "disposable", "webmail"):
+                require(type(hunter_data.get(field)) is bool)
+                records.append(record("HUNTER", field, hunter_data[field], request))
+            webmail_allowed = hunter_data.get("webmail_allowed")
+            require(webmail_allowed is None or type(webmail_allowed) is bool)
+            if webmail_allowed is not None:
+                records.append(record("HUNTER", "webmail_allowed", webmail_allowed, request))
+            count = 1
+            metadata["notice"] = "Free Email Insight signals only; this result does not search breach records."
+    elif request.provider == "pwnedpasswords":
+        require(isinstance(payload, bytes))
+        digest = hashlib.sha1(request.target.encode("utf-8")).hexdigest().upper()
+        suffix_to_find = digest[5:]
+        try:
+            lines = payload.decode("ascii").splitlines()
+        except UnicodeDecodeError as exc:
+            raise AdapterError("protocol_error") from exc
+        require(bool(lines))
+        prevalence = None
+        for line in lines:
+            suffix, separator, raw_count = line.partition(":")
+            require(bool(separator) and bool(re.fullmatch(r"[A-F0-9]{35}", suffix))
+                    and bool(re.fullmatch(r"[0-9]{1,12}", raw_count)))
+            if suffix == suffix_to_find:
+                prevalence = int(raw_count)
+        if prevalence:
+            records.append(record("HIBP Pwned Passwords", "occurrence_count", prevalence, request))
+            count = 1
+        metadata["notice"] = "The full password was compared on this server; only a padded SHA-1 prefix was sent to HIBP."
     elif request.provider == "leaklookup":
         require(isinstance(payload, dict) and (payload.get("error") is False or payload.get("error") == "false"))
         messages = payload.get("message")

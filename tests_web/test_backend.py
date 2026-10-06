@@ -78,9 +78,8 @@ class ContractTests(unittest.TestCase):
                 validate_request(payload, {"apiKey": KEY})
 
     def test_provider_credentials_are_server_only_and_required(self):
-        with self.assertRaises(AdapterError) as missing:
-            validate_request(public_search_payload("hunter"))
-        self.assertEqual(missing.exception.code, "provider_not_configured")
+        free_hunter = validate_request(public_search_payload("hunter"))
+        self.assertEqual(free_hunter.credentials, {"apiKey": ""})
         with self.assertRaises(AdapterError):
             validate_request({**public_search_payload("hunter"), "credentials": {"apiKey": KEY}}, {"apiKey": KEY})
         request = validate_request(public_search_payload("hunter"), {"apiKey": KEY})
@@ -101,6 +100,9 @@ class ContractTests(unittest.TestCase):
         providers = {entry["id"]: entry for entry in metadata["providers"]}
         self.assertTrue(providers["snusbase"]["credentialFields"][0]["configured"])
         self.assertTrue(providers["hibp"]["credentialFields"][0]["configured"])
+        self.assertEqual(providers["hunter"]["freeQueryTypes"], ["email"])
+        self.assertEqual(providers["pwnedpasswords"]["freeQueryTypes"], ["password"])
+        self.assertTrue(providers["hunter"]["apiDocumentationUrl"].startswith("https://"))
         self.assertEqual(metadata["version"], metadata["engine"]["version"])
 
 
@@ -242,6 +244,52 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(response["hasMore"])
         self.assertEqual(response["records"][0]["value"], "related@example.test")
 
+    def test_hunter_uses_anonymous_email_insight_without_provider_key(self):
+        target = "analyst@example.test"
+        request = validate_request(public_search_payload("hunter", target=target))
+        response, calls = self.run_provider(request, [SyntheticResponse({"data": {
+            "email": target, "gibberish": False, "pattern": True, "mx_records": True,
+            "disposable": False, "webmail": True, "webmail_allowed": None,
+        }, "meta": {"params": {"email": target}}})])
+        self.assertEqual(calls.call_args.args[1], "https://api.hunter.io/v2/email-insight")
+        self.assertEqual(calls.call_args.kwargs["params"], {"email": target})
+        self.assertEqual(response["status"], "found")
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["records"][0]["field"], "gibberish")
+        self.assertIn("does not search breach records", response["notice"])
+
+    def test_pwned_password_lookup_never_sends_the_full_password(self):
+        request = validate_request(public_search_payload(
+            "pwnedpasswords", query="password", target="password",
+        ))
+        worker_payload = request.to_dict()
+        worker_credentials = worker_payload.pop("credentials")
+        self.assertEqual(validate_request(worker_payload, worker_credentials), request)
+        response, calls = self.run_provider(request, [SyntheticResponse(raw=(
+            b"1E4C9B93F3F0682250B6CF8331B7EE68FD8:3\r\n"
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:0\r\n"
+        ))])
+        url = calls.call_args.args[1]
+        self.assertEqual(url, "https://api.pwnedpasswords.com/range/5BAA6")
+        self.assertEqual(calls.call_args.kwargs["headers"]["Add-Padding"], "true")
+        self.assertEqual(calls.call_args.kwargs["headers"]["User-Agent"], "h8mail-web-adapter")
+        self.assertNotIn("password", url.rsplit("/", 1)[-1])
+        self.assertEqual(response["status"], "found")
+        self.assertEqual(response["records"][0]["value"], "3")
+        self.assertEqual(response["target"], "[hidden]")
+        self.assertIn("only a padded SHA-1 prefix", response["notice"])
+
+    def test_pwned_password_lookup_reports_absent_password_without_echoing_it(self):
+        request = validate_request(public_search_payload(
+            "pwnedpasswords", query="password", target="private-candidate",
+        ))
+        response, _ = self.run_provider(request, [SyntheticResponse(raw=(
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:0\r\n"
+        ))])
+        self.assertEqual(response["status"], "not_found")
+        self.assertEqual(response["records"], [])
+        self.assertEqual(response["target"], "[hidden]")
+
     def test_hunter_uses_manual_offset_pagination(self):
         request = search_request("hunter", page=3)
         response, calls = self.run_provider(request, [SyntheticResponse({
@@ -371,7 +419,9 @@ class EngineTests(unittest.TestCase):
     def test_every_enabled_provider_rejects_malformed_success_payloads(self):
         for provider in PROVIDERS:
             if provider["available"] and not provider.get("apiRoute"):
-                response, _ = self.run_provider(search_request(provider["id"]), [SyntheticResponse({})])
+                query = "password" if "password" in provider["queryTypes"] else "email"
+                request = search_request(provider["id"], query=query)
+                response, _ = self.run_provider(request, [SyntheticResponse({})])
                 self.assertEqual(response["status"], "error", provider["id"])
                 self.assertEqual(response["error"]["code"], "protocol_error")
 

@@ -2,7 +2,7 @@ import './styles.css';
 import { mountEngine } from './engine';
 import { lookupIntelX } from './intelx';
 import { appendChaseTargets, extractEmails, isEmailAddress, MAX_TARGETS, parseEmailTargets, toCsv, visibleValue, type ExportRecord, type RecordEntry } from './domain';
-import { makeProviderSearchPlan, type ProviderSearchJob, type SearchProvider } from './provider-search';
+import { canRunProviderSearch, makeProviderSearchPlan, type ProviderSearchJob, type SearchProvider } from './provider-search';
 
 type ClientErrorType = 'uncaught_exception' | 'unhandled_rejection';
 
@@ -23,9 +23,9 @@ window.addEventListener('unhandledrejection', () => reportClientError('unhandled
 type QueryType = 'email' | 'username' | 'domain' | 'ip' | 'hash' | 'password' | 'selector';
 type Mode = 'online' | 'local' | 'extract' | 'engine';
 interface CredentialField { key: string; label: string; type: 'password' | 'text'; required?: boolean; environmentVariable?: string; configured?: boolean; default?: string; options?: string[] }
-interface Provider extends SearchProvider { credentialFields: CredentialField[]; description: string; accessDescription?: string; unavailableReason?: string }
+interface Provider extends SearchProvider { credentialFields: CredentialField[]; description: string; accessDescription?: string; unavailableReason?: string; apiDocumentationUrl?: string }
 interface Health { version: string; remoteEnabled: boolean; providers: Provider[]; localCompanion?: boolean; localAccessToken?: string; capabilities?: { maxTargets?: number; maxConcurrent?: number; urlExtraction?: boolean } }
-interface SearchResult { target: string; query?: QueryType; provider: string; status: 'found' | 'not_found' | 'error'; records: RecordEntry[]; count?: number; page?: number; total?: number; hasMore?: boolean; error?: { code: string; message: string }; truncated?: boolean; warnings?: { message: string }[] }
+interface SearchResult { target: string; query?: QueryType; provider: string; status: 'found' | 'not_found' | 'error'; records: RecordEntry[]; count?: number; page?: number; total?: number; hasMore?: boolean; error?: { code: string; message: string }; notice?: string; truncated?: boolean; warnings?: { message: string }[] }
 interface LocalResponse { type: 'progress' | 'complete' | 'error'; id: number; records?: { target: string; source: string; field: string; value: string }[]; filesProcessed?: number; totalFiles?: number; bytesRead?: number; matches?: number; truncated?: boolean; warnings?: string[]; message?: string }
 
 function element<T extends HTMLElement>(id: string): T {
@@ -83,15 +83,31 @@ function providersForQuery(query = querySelect.value): Provider[] {
     return (health?.providers ?? []).filter((provider) => provider.available && provider.queryTypes.includes(query as QueryType));
 }
 
+function runnableProvidersForQuery(query = querySelect.value): Provider[] {
+    return providersForQuery(query).filter((provider) => canRunProviderSearch(provider, query));
+}
+
+function hasConfiguredApiKey(provider: Provider): boolean {
+    return provider.credentialFields.some((field) => field.key === 'apiKey' && field.configured);
+}
+
 function renderProviderSummary(): void {
     const compatible = providersForQuery();
-    const names = compatible.map((provider) => provider.name).join(', ');
-    const missingKeys = compatible.filter((provider) => provider.credentialFields.some((field) => field.required && !field.configured)).length;
+    const runnable = compatible.filter((provider) => canRunProviderSearch(provider, querySelect.value));
+    const free = runnable.filter((provider) => !hasConfiguredApiKey(provider));
+    const missingKeys = compatible.length - runnable.length;
+    const names = runnable.map((provider) => provider.name).join(', ');
+    const emailFreeMode = querySelect.value === 'email' && free.some((provider) => provider.id === 'hunter');
     element('provider-description').textContent = compatible.length
-        ? `${compatible.length} hosted providers support ${queryLabels[querySelect.value as QueryType] ?? 'this query'}. Every one runs automatically.`
+        ? emailFreeMode
+            ? 'Without Vercel keys, email lookup uses Hunter Email Insight for deliverability signals. It does not search breach records.'
+            : runnable.length
+                ? `${runnable.length} source${runnable.length === 1 ? '' : 's'} can run for ${queryLabels[querySelect.value as QueryType] ?? 'this query'}; key-required sources are skipped automatically.`
+                : 'No key-free source is available for this query. Local file and text tools still work without deployment keys.'
         : 'No hosted provider supports this query type.';
-    element('provider-summary').textContent = compatible.length
-        ? `${names}${missingKeys ? ` · ${missingKeys} need Vercel API keys` : ' · configured providers ready'}`
+    element('provider-summary').textContent = runnable.length
+        ? `${names}${free.length ? ` · ${free.length} free without key` : ' · configured'}${missingKeys ? ` · ${missingKeys} key-required source${missingKeys === 1 ? '' : 's'} skipped` : ''}`
+        : compatible.length ? `${missingKeys} provider${missingKeys === 1 ? '' : 's'} require${missingKeys === 1 ? 's' : ''} an API key.`
         : 'Choose another query type or use the original local engine.';
 }
 
@@ -106,17 +122,35 @@ function renderProviderGuide(): void {
         const entry = document.createElement('article');
         entry.className = 'provider-guide-entry';
         const summary = document.createElement('div');
-        const name = document.createElement('span');
+        const state = document.createElement('span');
+        const apiKeyField = provider.credentialFields.find((field) => field.key === 'apiKey');
+        const keyConfigured = hasConfiguredApiKey(provider);
+        const freeWithoutKey = Boolean(provider.freeQueryTypes?.length && !apiKeyField?.required);
+        const stateLabel = !provider.available ? 'WEB UNAVAILABLE'
+            : keyConfigured ? 'KEY CONFIGURED'
+                : freeWithoutKey ? 'FREE · NO KEY REQUIRED'
+                    : provider.freeQueryTypes?.length ? 'KEY NOT SET · FREE MODE ACTIVE'
+                        : apiKeyField?.required ? 'KEY NOT CONFIGURED' : 'NO KEY REQUIRED';
+        const heading = document.createElement('div');
+        heading.className = 'provider-guide-heading';
+        const dot = document.createElement('span');
+        dot.className = `provider-status-dot${!provider.available ? ' unavailable' : keyConfigured || freeWithoutKey || !apiKeyField?.required ? ' configured' : ' missing'}`;
+        dot.setAttribute('aria-hidden', 'true');
+        const name = document.createElement('a');
         name.className = 'provider-guide-name';
         name.textContent = provider.name;
-        const state = document.createElement('span');
-        const keyConfigured = provider.credentialFields.some((field) => field.key === 'apiKey' && field.configured);
-        state.className = `provider-guide-state${provider.available && !keyConfigured ? ' missing' : ''}${provider.available ? '' : ' unavailable'}`;
-        state.textContent = provider.available ? (keyConfigured ? 'KEY CONFIGURED' : 'KEY NEEDED') : 'WEB UNAVAILABLE';
-        name.append(state);
+        if (provider.apiDocumentationUrl) {
+            name.href = provider.apiDocumentationUrl;
+            name.target = '_blank';
+            name.rel = 'noopener noreferrer';
+            name.setAttribute('aria-label', `${provider.name} API documentation, opens in a new tab`);
+        }
+        state.className = `provider-guide-state${!provider.available ? ' unavailable' : keyConfigured || freeWithoutKey || !apiKeyField?.required ? '' : ' missing'}`;
+        state.textContent = stateLabel;
+        heading.append(dot, name, state);
         const description = document.createElement('p');
         description.textContent = provider.available ? (provider.accessDescription || provider.description) : provider.unavailableReason || 'Unavailable in the hosted adapter.';
-        summary.append(name, description);
+        summary.append(heading, description);
         const keys = document.createElement('div');
         keys.className = 'provider-guide-keys';
         for (const field of provider.credentialFields) {
@@ -137,7 +171,7 @@ function renderProviderGuide(): void {
         if (!provider.credentialFields.length) {
             const note = document.createElement('span');
             note.className = 'provider-guide-empty';
-            note.textContent = provider.available ? 'No key configured for this adapter.' : 'No hosted key is supported.';
+            note.textContent = provider.available ? 'No key required for this source.' : 'No hosted key is supported.';
             keys.append(note);
         }
         entry.append(summary, keys);
@@ -165,7 +199,7 @@ function updateQuery(): void {
 }
 
 function updateControls(): void {
-    element<HTMLButtonElement>('online-submit').disabled = running || !health?.remoteEnabled || !providersForQuery().length;
+    element<HTMLButtonElement>('online-submit').disabled = running || !health?.remoteEnabled || !runnableProvidersForQuery().length;
     element<HTMLButtonElement>('local-submit').disabled = running;
     element<HTMLButtonElement>('extract-submit').disabled = running;
     querySelect.disabled = running || !health;
@@ -190,7 +224,15 @@ function parseHealth(value: unknown): Health {
             const options = Array.isArray(field.options) ? field.options.filter((option: unknown): option is string => typeof option === 'string') : undefined;
             return { key: field.key, label: field.label, type: field.type, required: field.required === true, environmentVariable: typeof field.environmentVariable === 'string' ? field.environmentVariable : undefined, configured: field.configured === true, default: typeof field.default === 'string' ? field.default : undefined, options };
         });
-        return { id: entry.id, name: entry.name, description: entry.description, accessDescription: typeof entry.accessDescription === 'string' ? entry.accessDescription : undefined, available: entry.available !== false, queryTypes: supportedQueries, credentialFields: fields, unavailableReason: typeof entry.unavailableReason === 'string' ? entry.unavailableReason : undefined };
+        const freeQueryTypes = Array.isArray(entry.freeQueryTypes) ? entry.freeQueryTypes.filter((query: unknown): query is QueryType => typeof query === 'string' && supportedQueries.includes(query as QueryType)) : [];
+        let apiDocumentationUrl: string | undefined;
+        if (typeof entry.apiDocumentationUrl === 'string') {
+            try {
+                const url = new URL(entry.apiDocumentationUrl);
+                if (url.protocol === 'https:' && !url.username && !url.password) apiDocumentationUrl = url.toString();
+            } catch { /* Invalid provider links are omitted. */ }
+        }
+        return { id: entry.id, name: entry.name, description: entry.description, accessDescription: typeof entry.accessDescription === 'string' ? entry.accessDescription : undefined, available: entry.available !== false, queryTypes: supportedQueries, freeQueryTypes, apiDocumentationUrl, credentialFields: fields, unavailableReason: typeof entry.unavailableReason === 'string' ? entry.unavailableReason : undefined };
     });
     return { version: value.version, remoteEnabled: value.remoteEnabled, providers, localCompanion: value.localCompanion === true, localAccessToken: typeof value.localAccessToken === 'string' ? value.localAccessToken : undefined, capabilities: isObject(value.capabilities) ? { urlExtraction: value.capabilities.urlExtraction === true } : undefined };
 }
@@ -244,7 +286,7 @@ function parseSearchResult(value: unknown, target: string, provider: string): Se
     });
     const error = isObject(value.error) && typeof value.error.code === 'string' && typeof value.error.message === 'string' ? { code: value.error.code, message: value.error.message } : undefined;
     const warnings = Array.isArray(value.warnings) ? value.warnings.filter((warning: unknown): warning is { message: string } => isObject(warning) && typeof warning.message === 'string').map((warning) => ({ message: warning.message })) : [];
-    return { target, provider, query: typeof value.query === 'string' && queryTypes.includes(value.query as QueryType) ? value.query as QueryType : undefined, status: value.status as SearchResult['status'], records, count: typeof value.count === 'number' ? value.count : records.length, page: typeof value.page === 'number' ? value.page : 1, total: typeof value.total === 'number' ? value.total : undefined, hasMore: value.hasMore === true, error, truncated: value.truncated === true, warnings };
+    return { target, provider, query: typeof value.query === 'string' && queryTypes.includes(value.query as QueryType) ? value.query as QueryType : undefined, status: value.status as SearchResult['status'], records, count: typeof value.count === 'number' ? value.count : records.length, page: typeof value.page === 'number' ? value.page : 1, total: typeof value.total === 'number' ? value.total : undefined, hasMore: value.hasMore === true, error, notice: typeof value.notice === 'string' ? value.notice : undefined, truncated: value.truncated === true, warnings };
 }
 
 function errorMessage(payload: unknown, fallback: string): string {
@@ -320,9 +362,11 @@ async function runOnline(event: SubmitEvent): Promise<void> {
     let targets: string[];
     const query = querySelect.value as QueryType;
     const compatible = providersForQuery(query);
+    const runnable = runnableProvidersForQuery(query);
     try {
         targets = validateTargets(onlineTargets.value, query);
         if (!compatible.length) throw new Error('No hosted provider supports this query type.');
+        if (!runnable.length) throw new Error('No key-free source supports this lookup. Configure an API key to use these providers, or use local tools.');
     } catch (error: unknown) {
         setMessage('online-message', error instanceof Error ? error.message : 'Check the search input.', 'error');
         return;
@@ -333,7 +377,7 @@ async function runOnline(event: SubmitEvent): Promise<void> {
     const seen = new Set(targets);
     const id = beginRun();
     const signal = controller?.signal;
-    setMessage('online-message', `Searching ${targets.length} target${targets.length === 1 ? '' : 's'} with all ${compatible.length} compatible providers…`);
+    setMessage('online-message', `Searching ${targets.length} target${targets.length === 1 ? '' : 's'} with ${runnable.length} available source${runnable.length === 1 ? '' : 's'}…`);
     let nextIndex = 0;
     let completed = 0;
     const ordered: (SearchResult | undefined)[] = [];
@@ -344,7 +388,7 @@ async function runOnline(event: SubmitEvent): Promise<void> {
             ordered.push(undefined);
         }
     };
-    enqueue(makeProviderSearchPlan(targets, compatible, query));
+    enqueue(makeProviderSearchPlan(targets, runnable, query));
     const searchNext = async (): Promise<void> => {
         while (id === runId && nextIndex < queue.length) {
             const job = queue[nextIndex++];
@@ -371,7 +415,7 @@ async function runOnline(event: SubmitEvent): Promise<void> {
                 const truncated = appendChaseTargets(targets, seen, result.records, chaseLimit, powerChase);
                 if (targets.length > previousTargetCount) {
                     const discovered = targets.slice(previousTargetCount);
-                    enqueue(makeProviderSearchPlan(discovered, compatible, query));
+                    enqueue(makeProviderSearchPlan(discovered, runnable, query));
                 }
                 if (truncated && !runWarnings.includes('Chase stopped at the configured target limit. Some related addresses were not queried.')) runWarnings.push('Chase stopped at the configured target limit. Some related addresses were not queried.');
             }
@@ -540,6 +584,12 @@ function renderResults(): void {
         status.textContent = result.status === 'found' ? `${result.records.length} RECORD${result.records.length === 1 ? '' : 'S'} FOUND` : result.status === 'not_found' ? 'NO MATCHES REPORTED' : 'LOOKUP FAILED';
         heading.append(target, provider, status);
         group.append(heading);
+        if (result.notice) {
+            const notice = document.createElement('p');
+            notice.className = 'run-warning';
+            notice.textContent = result.notice;
+            group.append(notice);
+        }
         if (result.records.length) {
             const wrapper = document.createElement('div');
             wrapper.className = 'table-scroll';
@@ -712,7 +762,7 @@ element<HTMLInputElement>('extract-file').addEventListener('change', async (even
 element('extract-clear').addEventListener('click', () => { fileReadGeneration += 1; element<HTMLTextAreaElement>('extract-text').value = ''; element<HTMLTextAreaElement>('extract-urls').value = ''; extracted = []; element('extraction-output').hidden = true; setMessage('extract-message', ''); });
 element('use-extracted').addEventListener('click', () => {
     onlineTargets.value = extracted.slice(0, MAX_TARGETS).join('\n');
-    if (providersForQuery('email').length) { querySelect.value = 'email'; updateQuery(); }
+    if (runnableProvidersForQuery('email').length) { querySelect.value = 'email'; updateQuery(); }
     updateTargetCount();
     setMode('online');
     onlineTargets.focus();

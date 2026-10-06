@@ -55,21 +55,29 @@ collapsed **Provider access and Vercel key setup** section lists the server
 variable names and reports whether each API key is configured; it never exposes
 the values.
 
-Every listed provider key is optional at deployment level. A single search calls
-all hosted providers compatible with that query. Providers without a configured
-key return a visible `provider_not_configured` result, while configured
-providers continue. Add only keys for services you have access to. HIBP breach
-and paste searches share one key. IntelX lists public, free-account and paid API
-instances, and requires an API license for third-party integrations. This
-adapter uses the free or paid instance assigned to the account. It defaults to
-paid; set `INTELX_API_TIER=free` only if IntelX assigned your key to that
-instance.
+All online lookups that have a public no-key API work without Vercel
+environment variables. With no keys, email lookups run Hunter Email Insight,
+which checks address and domain deliverability signals but does not search
+breach records. Password lookups run HIBP Pwned Passwords using k-anonymity and
+response padding; only the first five characters of a SHA-1 hash are sent to
+HIBP. Providers requiring keys are skipped automatically and do not appear as
+lookup failures. Configured providers join the same aggregate search.
+
+Hunter's API key is optional for Email Insight and enables its separate
+domain-search endpoint for related addresses. HIBP email-breach and paste
+searches require an API subscription key; its documented integration-test
+email is the only no-subscription exception. EmailRep anonymous access is
+disabled and new keys are not currently issued. IntelX's public instance is
+available to non-registered users on its site, but third-party API integration
+requires an API license; this adapter therefore uses an account-assigned API
+instance and key. IntelX defaults to the paid instance; set
+`INTELX_API_TIER=free` only if IntelX assigned that instance to your key.
 
 | Variable | Purpose |
 | --- | --- |
 | `HIBP_API_KEY` | Have I Been Pwned account breach and paste searches. |
 | `EMAILREP_API_KEY` | EmailRep reputation lookup. |
-| `HUNTER_API_KEY` | Hunter domain email search. |
+| `HUNTER_API_KEY` | Optional. Enables Hunter related-domain email search; Email Insight works without it. |
 | `LEAKLOOKUP_API_KEY` | Leak-Lookup search. |
 | `SNUSBASE_API_KEY` | Snusbase activation code. |
 | `DEHASHED_API_KEY` | DeHashed API v2. |
@@ -98,7 +106,7 @@ capabilities.
 | Breach Compilation data | Browser can search readable text selected by the user | Original indexed-directory engine; use local paths |
 | Cleartext and GZIP local datasets | Files stay in the browser; bounded streaming worker | Original filesystem and multiprocessing search for large datasets |
 | TAR/GZIP archives and directories | Selected folders and regular text members of TAR, TAR.GZ and TGZ archives, within browser limits; archive links are skipped | Original archive/directory engine on your computer |
-| Related email discovery | Hunter with a compatible API key; bounded results | Original provider methods |
+| Related email discovery | Hunter domain search with an API key; bounded results | Original provider methods |
 | Chasing related addresses | Interface chase/power-chase controls, at most 25 addresses total | Original `--chase` and `--power-chase` |
 | Premium provider lookups | Curated HTTPS adapters with explicit service status | Original provider integrations and configuration files |
 | Username, password, IP, hash and domain queries | Supported query types depend on the selected provider | Original `--custom-query` and local loose queries |
@@ -109,15 +117,16 @@ capabilities.
 | INI keys and `--gen-config` | Enter provider keys in memory | Config-file paths in the local engine; original `--gen-config` through CLI |
 | Debug mode | Safe error codes instead of provider payloads | Original CLI `--debug`; treat its output as sensitive |
 
-Vercel adapters cover HIBP breaches/pastes, EmailRep, Hunter, Leak-Lookup,
-Snusbase, DeHashed and BreachDirectory through its RapidAPI endpoint. IntelX
-uses its incremental API workflow. A query is sent to every compatible hosted
-adapter in the same user action. Each provider controls its own key, subscription,
-quota and response coverage; a successful integration cannot guarantee a
-particular result. Legacy Scylla and WeLeakInfo methods remain in the original
-package, but the hosted interface marks them unavailable because their current
-secure API contracts are not verified. Retaining legacy source does not mean
-those external services currently work.
+Vercel adapters cover HIBP breaches/pastes, HIBP Pwned Passwords, EmailRep,
+Hunter, Leak-Lookup, Snusbase, DeHashed and BreachDirectory through its RapidAPI
+endpoint. IntelX uses its incremental API workflow. A query is sent to every
+compatible provider whose key is configured, plus compatible public no-key
+endpoints. Providers control their own access, quota and response coverage; a
+successful integration cannot guarantee a particular result. Legacy Scylla
+and WeLeakInfo methods remain in the original package, but the hosted interface
+marks them unavailable because their current secure API contracts are not
+verified. Retaining legacy source does not mean those external services
+currently work.
 
 Remote searches are bounded by target, response-size, record and execution limits.
 Hunter and DeHashed expose one provider page at a time; use **Load next page** to
@@ -181,6 +190,6 @@ npm --prefix web run build
 The automated provider tests use offline fixtures. They verify contracts,
 validation, credential isolation, error handling and upstream compatibility
 without sending private targets or using paid credentials. The live Vercel test
-must use a reserved test address. Only providers with configured keys can make
-live lookups; missing keys are reported explicitly rather than presented as a
-successful empty search.
+can use Hunter Email Insight and HIBP Pwned Passwords without configured keys.
+HIBP email breach lookup should only be live-tested against its documented
+reserved test addresses unless a real subscription key is configured.

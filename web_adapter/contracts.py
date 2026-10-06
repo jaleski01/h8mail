@@ -87,8 +87,12 @@ def validate_request(payload: object, server_credentials: dict[str, str] | None 
             raise AdapterError("invalid_request") from exc
     elif not target or len(target) > 256:
         raise AdapterError("invalid_request")
+    if not isinstance(credentials, dict):
+        raise AdapterError("invalid_request")
     allowed_credentials = {field["key"] for field in provider["credentialFields"]}
-    if not isinstance(credentials, dict) or set(credentials) - allowed_credentials:
+    if not provider["credentialFields"] and credentials.get("apiKey", "") == "":
+        allowed_credentials.add("apiKey")
+    if set(credentials) - allowed_credentials:
         raise AdapterError("invalid_request")
     api_key = credentials.get("apiKey", "")
     if not isinstance(api_key, str) or len(api_key) > 512 or any(
@@ -98,7 +102,8 @@ def validate_request(payload: object, server_credentials: dict[str, str] | None 
     api_key = api_key.strip()
     if provider_id == "hunter" and not api_key and page != 1:
         raise AdapterError("invalid_request")
-    if provider["credentialFields"][0]["required"] and not api_key:
+    free_query = query in provider.get("freeQueryTypes", [])
+    if provider["credentialFields"] and provider["credentialFields"][0]["required"] and not api_key and not free_query:
         raise AdapterError("provider_not_configured")
     if provider_id in ("hibp", "hibp_pastes") and not re.fullmatch(r"[a-fA-F0-9]{32}", api_key):
         raise AdapterError("invalid_credentials")
