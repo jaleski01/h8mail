@@ -1,17 +1,29 @@
 {
     "$schema": "https://openapi.vercel.sh/vercel.json",
-    "framework": null,
-    "installCommand": "npm ci",
-    "buildCommand": "npm run build",
-    "outputDirectory": "dist",
-    "functions": {
-        "api/index.py": {
-            "maxDuration": 60,
-            "excludeFiles": "{web/**,tests/**,tests_web/**,scripts/**,docs/**,node_modules/**,work/**}"
+    "services": {
+        "app": {
+            "root": "web",
+            "framework": "vite",
+            "installCommand": "npm ci",
+            "buildCommand": "npm run build",
+            "outputDirectory": "dist"
+        },
+        "backend": {
+            "root": ".",
+            "runtime": "python",
+            "entrypoint": "api.index:app",
+            "functions": {
+                "api/index.py": {
+                    "maxDuration": 60,
+                    "excludeFiles": "{web/**,tests/**,tests_web/**,scripts/**,docs/**,node_modules/**,work/**}"
+                }
+            }
         }
     },
     "rewrites": [
-        { "source": "/api/:path*", "destination": "/api/index?route=:path*" }
+        { "source": "/api", "destination": { "service": "backend" } },
+        { "source": "/api/(.*)", "destination": { "service": "backend" } },
+        { "source": "/(.*)", "destination": { "service": "app" } }
     ],
     "headers": [
         {

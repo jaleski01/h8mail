@@ -17,8 +17,8 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     if not 1024 <= arguments.port <= 65535:
         parser.error("Choose a port between 1024 and 65535.")
-    if not (Path(__file__).resolve().parents[1] / "dist" / "index.html").is_file():
-        parser.error("Run npm ci and npm run build before starting the local application.")
+    if not (Path(__file__).resolve().parents[1] / "web" / "dist" / "index.html").is_file():
+        parser.error("Run npm ci --prefix web and npm --prefix web run build before starting the local application.")
     token = secrets.token_urlsafe(32)
     os.environ["H8MAIL_ACCESS_TOKEN"] = token
     server = LocalServer(arguments.port, token)

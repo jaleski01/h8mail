@@ -15,9 +15,9 @@ remote deployment or scheduled upstream updates.
 Use Node.js 22.12 or newer and a Python installation with `pip`:
 
 ```bash
-npm ci
+npm ci --prefix web
 python -m pip install -r requirements.txt
-npm run build
+npm --prefix web run build
 python scripts/local_app.py
 ```
 
@@ -28,8 +28,8 @@ variable is required for this mode. Keep it bound to your own computer.
 For interface development, run these in separate terminals:
 
 ```bash
-npm run dev:api
-npm run dev
+npm --prefix web run dev:api
+npm --prefix web run dev
 ```
 
 The Vite development server proxies `/api` to the local Python API. For its remote
@@ -46,12 +46,16 @@ python -m h8mail --help
 
 ## Optional Vercel setup
 
-If you choose to host the adaptation, publish this complete folder to a
-repository that you own. Use `master` as its default branch, then import it in
-Vercel through the GitHub integration. Use the repository root, framework preset
-**Other**, install command `npm ci`, build command `npm run build`, output
-directory `dist`, and production branch `master`. The repository's `vercel.json`
-provides the Python API route and static application routes.
+Import this repository with its root as the Vercel project root. `vercel.json`
+defines two services: the Vite app builds from `web/` and serves `/`; the Python
+API runs from the repository root and receives `/api` and `/api/*`. The API path
+must remain public because the browser calls it on the same origin; lookup and
+extraction requests still require `H8MAIL_ACCESS_TOKEN`. Vercel Services are
+currently in beta.
+
+For a local Vercel router test, run `npx vercel dev -L` from the repository
+root. The `-L` mode does not link a Vercel account or download project
+environment variables.
 
 Only one application environment variable is required:
 
@@ -156,9 +160,9 @@ process. It preserves the upstream behavior and its external-service limitations
 
 ```bash
 python -m unittest discover -s tests_web
-npm run check
-npm test
-npm run build
+npm --prefix web run check
+npm --prefix web test
+npm --prefix web run build
 ```
 
 The automated provider tests use offline fixtures. They verify contracts,

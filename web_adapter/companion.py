@@ -194,7 +194,7 @@ class LocalHandler(handler):
             self._serve_static()
 
     def _serve_static(self):
-        root = ROOT / "dist"
+        root = ROOT / "web" / "dist"
         path = (root / unquote(urlsplit(self.path).path).lstrip("/")).resolve()
         if not path.is_relative_to(root.resolve()) or (not path.is_file() and path != root.resolve()):
             self._send(404, {"error": {"code": "not_found", "message": "The file was not found."}})
@@ -202,7 +202,7 @@ class LocalHandler(handler):
         if path == root.resolve():
             path = root / "index.html"
         if not path.is_file():
-            self._send(503, {"error": {"code": "build_required", "message": "Run npm run build before starting the local application."}})
+            self._send(503, {"error": {"code": "build_required", "message": "Run npm --prefix web run build before starting the local application."}})
             return
         content_types = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
         content = path.read_bytes()

@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from api.index import handler, health
+from api.index import app as wsgi_app, handler, health
 from web_adapter.contracts import MAX_RECORDS, result, validate_request
 from web_adapter.engine import run_search
 from web_adapter.errors import AdapterError
@@ -466,6 +466,45 @@ class HttpTests(unittest.TestCase):
             for body, expected in (("not-json", 400), ("{}", 400), ("x" * 20_000, 413)):
                 self.assertEqual(self.request("POST", "/api/search", body=body)[0], expected)
             execute.assert_not_called()
+
+
+class WsgiTests(unittest.TestCase):
+    def request(self, method, path, payload=None, token=TOKEN):
+        body = json.dumps(payload).encode("utf-8") if payload is not None else b""
+        environ = {
+            "REQUEST_METHOD": method,
+            "PATH_INFO": path,
+            "QUERY_STRING": "",
+            "CONTENT_TYPE": "application/json" if payload is not None else "",
+            "CONTENT_LENGTH": str(len(body)) if payload is not None else "",
+            "HTTP_AUTHORIZATION": f"Bearer {token}",
+            "wsgi.input": io.BytesIO(body),
+        }
+        captured = {}
+
+        def start_response(status, headers):
+            captured["status"] = status
+            captured["headers"] = dict(headers)
+
+        response = b"".join(wsgi_app(environ, start_response))
+        return int(captured["status"].split(" ", 1)[0]), captured["headers"], json.loads(response)
+
+    def test_wsgi_health_returns_uncached_json_without_access_key(self):
+        status, headers, payload = self.request("GET", "/api/health", token="")
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["remoteEnabled"])
+        self.assertEqual(headers["Cache-Control"], "no-store, private")
+
+    def test_wsgi_search_uses_the_existing_authorization_boundary(self):
+        request = search_request()
+        payload = result(request, [], 0)
+        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": TOKEN}), patch(
+            "api.index.execute_search", return_value=payload
+        ) as execute:
+            status, _, response = self.request("POST", "/api/search", request.to_dict())
+        self.assertEqual(status, 200)
+        self.assertEqual(response, payload)
+        execute.assert_called_once()
 
 
 if __name__ == "__main__":

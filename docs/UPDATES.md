@@ -23,8 +23,9 @@ its default and Vercel production branch.
    collisions, oversized imports and license changes.
 3. Commit a candidate in the runner's isolated checkout. Install only this
    adaptation's pinned dependencies, never upstream setup scripts or requirements.
-4. Run `python -m unittest discover -s tests_web`, `npm run check`, `npm test`
-   and `npm run build`. Verify that validation did not alter tracked source.
+4. Run `python -m unittest discover -s tests_web`, `npm --prefix web run check`,
+   `npm --prefix web test` and `npm --prefix web run build`. Verify that
+   validation did not alter tracked source.
 5. If every check passes, a separate job checks out the original production SHA
    and uses its trusted importer to recreate the exact tested upstream snapshot.
    It commits only the upstream package, license and lock.
@@ -82,11 +83,11 @@ git worktree add ../H8MAIL-update -b review/upstream master
 cd ../H8MAIL-update
 python scripts/sync_upstream.py
 python -m pip install -r requirements.txt
-npm ci
+npm ci --prefix web
 python -m unittest discover -s tests_web
-npm run check
-npm test
-npm run build
+npm --prefix web run check
+npm --prefix web test
+npm --prefix web run build
 git diff -- h8mail LICENSE UPSTREAM.lock.json
 ```
 
