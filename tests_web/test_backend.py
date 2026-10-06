@@ -16,7 +16,7 @@ import requests
 
 from api.index import app as wsgi_app, handler, health
 from web_adapter.contracts import MAX_RECORDS, result, validate_request
-from web_adapter.engine import run_search
+from web_adapter.engine import run_pwned_password_search, run_search
 from web_adapter.errors import AdapterError
 from web_adapter.executor import execute_search
 from web_adapter.providers import PROVIDERS, PROVIDER_BY_ID
@@ -266,11 +266,14 @@ class EngineTests(unittest.TestCase):
         worker_payload = request.to_dict()
         worker_credentials = worker_payload.pop("credentials")
         self.assertEqual(validate_request(worker_payload, worker_credentials), request)
-        with patch("web_adapter.engine.hashlib.sha1", wraps=hashlib.sha1) as sha1:
-            response, calls = self.run_provider(request, [SyntheticResponse(raw=(
+        transport = Transport(request.provider)
+        transport.session.request = Mock(side_effect=[SyntheticResponse(raw=(
                 b"1E4C9B93F3F0682250B6CF8331B7EE68FD8:3\r\n"
                 b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:0\r\n"
             ))])
+        calls = transport.session.request
+        with patch("web_adapter.engine.hashlib.sha1", wraps=hashlib.sha1) as sha1:
+            response = run_pwned_password_search(request, transport)
         self.assertEqual(len(sha1.call_args_list), 2)
         self.assertTrue(all(call.kwargs["usedforsecurity"] is False for call in sha1.call_args_list))
         url = calls.call_args.args[1]
@@ -438,6 +441,15 @@ class EngineTests(unittest.TestCase):
 
 
 class ExecutorTests(unittest.TestCase):
+    def test_pwned_passwords_uses_its_bounded_transport_without_a_worker(self):
+        request = search_request("pwnedpasswords", query="password", target="password")
+        expected = result(request, [], 0)
+        with patch("web_adapter.executor.run_pwned_password_search", return_value=expected) as lookup, \
+                patch("web_adapter.executor.subprocess.run") as worker:
+            self.assertEqual(execute_search(request), expected)
+        lookup.assert_called_once_with(request)
+        worker.assert_not_called()
+
     def test_worker_uses_stdin_and_does_not_inherit_provider_keys(self):
         request = search_request()
         expected = result(request, [], 0)

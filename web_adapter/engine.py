@@ -69,6 +69,14 @@ def hibp_password_hash(password: str) -> str:
     return hashlib.sha1(password.encode("utf-8"), usedforsecurity=False).hexdigest().upper()
 
 
+def request_pwned_passwords(request: SearchRequest, transport: Transport) -> None:
+    digest = hibp_password_hash(request.target)
+    transport.request(
+        f"https://api.pwnedpasswords.com/range/{digest[:5]}", "GET",
+        {"User-Agent": "h8mail-web-adapter", "Add-Padding": "true"}, raw=True,
+    )
+
+
 def record(source: str, field: str, value: object, request: SearchRequest) -> dict[str, str]:
     require(isinstance(source, str) and isinstance(field, str)
             and isinstance(value, (str, int, float, bool)))
@@ -124,12 +132,6 @@ def invoke(request: SearchRequest, target: WebTarget, transport: Transport) -> N
         else:
             transport.request("https://api.hunter.io/v2/email-insight", "GET", target.headers,
                               params={"email": request.target})
-    elif request.provider == "pwnedpasswords":
-        digest = hibp_password_hash(request.target)
-        transport.request(
-            f"https://api.pwnedpasswords.com/range/{digest[:5]}", "GET",
-            {**target.headers, "User-Agent": "h8mail-web-adapter", "Add-Padding": "true"}, raw=True,
-        )
     elif request.provider == "leaklookup":
         # Use the public method for email to avoid legacy private-field parsing bugs.
         if request.query == "email":
@@ -355,6 +357,8 @@ def normalize(request: SearchRequest, transport: Transport) -> dict:
 
 def run_search(request: SearchRequest, transport: Transport | None = None) -> dict:
     """Use only within a dedicated child process; CLI stdout is process-local."""
+    if request.provider == "pwnedpasswords":
+        return run_pwned_password_search(request, transport)
     connection = transport or Transport(request.provider)
     try:
         with contextlib.redirect_stdout(DiscardOutput()), contextlib.redirect_stderr(DiscardOutput()), \
@@ -371,5 +375,17 @@ def run_search(request: SearchRequest, transport: Transport | None = None) -> di
     except (Exception, SystemExit):
         # The original CLI uses broad catches and exit(); neither may escape the worker boundary.
         return result(request, [], 0, "engine_error")
+    finally:
+        connection.close()
+
+
+def run_pwned_password_search(request: SearchRequest, transport: Transport | None = None) -> dict:
+    """Run the self-contained HIBP range API path without invoking the legacy CLI."""
+    connection = transport or Transport(request.provider)
+    try:
+        request_pwned_passwords(request, connection)
+        return normalize(request, connection)
+    except AdapterError as exc:
+        return result(request, [], 0, exc.code)
     finally:
         connection.close()

@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from .contracts import MAX_RECORDS, SearchRequest, result
+from .engine import run_pwned_password_search
 from .providers import PROVIDERS
 
 WORKER_TIMEOUT = 25
@@ -14,6 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def execute_search(request: SearchRequest) -> dict:
+    if request.provider == "pwnedpasswords":
+        return run_pwned_password_search(request)
+
     environment = os.environ.copy()
     environment.pop("H8MAIL_ACCESS_TOKEN", None)
     for provider in PROVIDERS:
