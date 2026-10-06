@@ -1,0 +1,20 @@
+{
+    "name": "h8mail-web",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "engines": { "node": ">=22.12.0" },
+    "scripts": {
+        "dev": "vite --host 127.0.0.1",
+        "dev:api": "python scripts/dev_server.py",
+        "check": "tsc --noEmit",
+        "test": "tsx --test web/tests/*.test.ts",
+        "build": "npm run check && vite build",
+        "preview": "vite preview --host 127.0.0.1"
+    },
+    "devDependencies": {
+        "tsx": "4.23.15",
+        "typescript": "7.0.2",
+        "vite": "8.3.3"
+    }
+}

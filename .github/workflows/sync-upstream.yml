@@ -1,0 +1,112 @@
+name: Sync upstream safely
+
+on:
+  schedule:
+    - cron: '27 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync-master
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      changed: ${{ steps.import.outputs.changed }}
+      upstream_sha: ${{ steps.import.outputs.upstream_sha }}
+      base_sha: ${{ steps.import.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: master
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Import package into this isolated candidate checkout
+        id: import
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          result = subprocess.run(
+              ['python', 'scripts/sync_upstream.py'],
+              check=True, stdout=subprocess.PIPE, text=True,
+          )
+          snapshot = json.loads(result.stdout)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f"base_sha={base}\n")
+              output.write(f"upstream_sha={snapshot['commit']}\n")
+              output.write(f"changed={str(snapshot['changed']).lower()}\n")
+          print(f"Upstream snapshot: {snapshot['commit']}; changed: {snapshot['changed']}")
+          PY
+      - name: Record the candidate before executing its code
+        if: steps.import.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --force -- h8mail LICENSE UPSTREAM.lock.json
+          git commit -m "Validate upstream h8mail candidate"
+      - name: Install pinned application dependencies
+        if: steps.import.outputs.changed == 'true'
+        run: |
+          python -m pip install -r requirements.txt
+          npm ci
+      - name: Test server boundaries and upstream compatibility
+        if: steps.import.outputs.changed == 'true'
+        run: python -m unittest discover -s tests_web
+      - name: Check and build the interface
+        if: steps.import.outputs.changed == 'true'
+        run: |
+          npm run check
+          npm test
+          npm run build
+      - name: Confirm validation did not alter tracked application code
+        if: steps.import.outputs.changed == 'true'
+        run: git diff --exit-code HEAD
+
+  promote:
+    needs: validate
+    if: needs.validate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.base_sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Recreate only the tested package import from trusted application code
+        env:
+          UPSTREAM_SHA: ${{ needs.validate.outputs.upstream_sha }}
+        run: python scripts/sync_upstream.py --commit "$UPSTREAM_SHA"
+      - name: Publish with a compare-and-swap guard on production
+        env:
+          BASE_SHA: ${{ needs.validate.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ needs.validate.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --force -- h8mail LICENSE UPSTREAM.lock.json
+          git commit -m "Sync upstream h8mail ${UPSTREAM_SHA:0:12}"
+          if ! git push --force-with-lease="refs/heads/master:$BASE_SHA" origin HEAD:refs/heads/master; then
+            echo '::error::Production changed or branch permissions rejected the update. No replacement was forced. Re-run after reviewing master and branch rules.'
+            exit 1
+          fi

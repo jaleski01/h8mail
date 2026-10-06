@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/khast3x/h8mail.git",
+  "branch": "master",
+  "commit": "ee31c8ff6d148580047ae5048fea2234decb5932",
+  "license_sha256": "9edc04581202193dce6e8819dfdb37c1106d1aa6be25012d8852e6b3901780bc",
+  "managed_paths": [
+    "LICENSE",
+    "h8mail/__init__.py",
+    "h8mail/__main__.py",
+    "h8mail/requirements.txt",
+    "h8mail/utils/__init__.py",
+    "h8mail/utils/breachcompilation.py",
+    "h8mail/utils/chase.py",
+    "h8mail/utils/classes.py",
+    "h8mail/utils/colors.py",
+    "h8mail/utils/gen_config.py",
+    "h8mail/utils/helpers.py",
+    "h8mail/utils/intelx.py",
+    "h8mail/utils/intelx_helpers.py",
+    "h8mail/utils/localgzipsearch.py",
+    "h8mail/utils/localsearch.py",
+    "h8mail/utils/print_json.py",
+    "h8mail/utils/print_results.py",
+    "h8mail/utils/run.py",
+    "h8mail/utils/summary.py",
+    "h8mail/utils/url.py",
+    "h8mail/utils/version.py"
+  ]
+}

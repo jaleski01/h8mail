@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+tests
+tests_web
+work
+.venv
+.env*
+__pycache__
+*.pyc

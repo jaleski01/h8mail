@@ -112,4 +112,12 @@ keysbackup.ini
 .vscode/launch.json
 file1.bin
 *.txt
+!requirements.txt
 test.json
+
+# Web adapter development
+node_modules/
+.vercel/
+.env.*
+!.env.example
+work/
