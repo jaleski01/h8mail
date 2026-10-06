@@ -4,10 +4,12 @@ import { lookupIntelX } from './intelx';
 import { appendChaseTargets, extractEmails, isEmailAddress, MAX_TARGETS, parseEmailTargets, toCsv, visibleValue, type ExportRecord, type RecordEntry } from './domain';
 import { canRunProviderSearch, makeProviderSearchPlan, type ProviderSearchJob, type SearchProvider } from './provider-search';
 
-type ClientErrorType = 'uncaught_exception' | 'unhandled_rejection';
+type ClientErrorEvent =
+    | { type: 'uncaught_exception' | 'unhandled_rejection'; route: 'app' | 'local' }
+    | { type: 'provider_lookup_error'; route: 'app'; provider: string };
 
-function reportClientError(type: ClientErrorType, route: 'app' | 'local'): void {
-    const body = new Blob([JSON.stringify({ type, route })], { type: 'application/json' });
+function reportClientError(event: ClientErrorEvent): void {
+    const body = new Blob([JSON.stringify(event)], { type: 'application/json' });
     try {
         if (navigator.sendBeacon('/api/client-error', body)) return;
     } catch {
@@ -17,8 +19,8 @@ function reportClientError(type: ClientErrorType, route: 'app' | 'local'): void 
         .catch(() => undefined);
 }
 
-window.addEventListener('error', () => reportClientError('uncaught_exception', 'app'));
-window.addEventListener('unhandledrejection', () => reportClientError('unhandled_rejection', 'app'));
+window.addEventListener('error', () => reportClientError({ type: 'uncaught_exception', route: 'app' }));
+window.addEventListener('unhandledrejection', () => reportClientError({ type: 'unhandled_rejection', route: 'app' }));
 
 type QueryType = 'email' | 'username' | 'domain' | 'ip' | 'hash' | 'password' | 'selector';
 type Mode = 'online' | 'local' | 'extract' | 'engine';
@@ -406,6 +408,9 @@ async function runOnline(event: SubmitEvent): Promise<void> {
                 }
             } catch (error: unknown) {
                 if (id !== runId || signal?.aborted) return;
+                if (error instanceof TypeError) {
+                    reportClientError({ type: 'provider_lookup_error', route: 'app', provider: job.provider.id });
+                }
                 result = { target: job.target, query, provider: job.provider.name, status: 'error', records: [], error: { code: 'REQUEST_FAILED', message: error instanceof Error ? error.message : 'The server could not complete this lookup.' } };
             }
             if (id !== runId) return;

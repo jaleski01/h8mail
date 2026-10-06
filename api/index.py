@@ -16,6 +16,7 @@ from web_adapter.providers import PROVIDERS, PROVIDER_BY_ID, get_provider_creden
 LOGGER = logging.getLogger("h8mail.api")
 API_ROUTES = {"health", "search", "extract", "intelx", "client-error"}
 CLIENT_ERROR_TYPES = {"uncaught_exception", "unhandled_rejection"}
+CLIENT_PROVIDER_ERROR_TYPE = "provider_lookup_error"
 CLIENT_ERROR_ROUTES = {"app"}
 URL_ERROR_CODES = {
     "invalid_url", "dns_error", "blocked_address", "redirect_error", "website_error",
@@ -110,14 +111,29 @@ def _dispatch_request(
             if not isinstance(payload, dict) or set(payload) != {"url"} or not isinstance(payload["url"], str):
                 raise AdapterError("invalid_request")
         elif route == "client-error":
-            if (not isinstance(payload, dict) or set(payload) != {"type", "route"}
-                    or not isinstance(payload["type"], str) or payload["type"] not in CLIENT_ERROR_TYPES
-                    or not isinstance(payload["route"], str) or payload["route"] not in CLIENT_ERROR_ROUTES):
+            if not isinstance(payload, dict):
                 raise AdapterError("invalid_request")
-            LOGGER.error(json.dumps({
-                "level": "error", "event": "client_error", "code": "client_error",
-                "type": payload["type"], "route": payload["route"],
-            }, separators=(",", ":"), sort_keys=True))
+            error_type = payload.get("type")
+            if isinstance(error_type, str) and error_type in CLIENT_ERROR_TYPES:
+                if (set(payload) != {"type", "route"} or not isinstance(payload.get("route"), str)
+                        or payload["route"] not in CLIENT_ERROR_ROUTES):
+                    raise AdapterError("invalid_request")
+                event = {
+                    "level": "error", "event": "client_error", "code": "client_error",
+                    "type": error_type, "route": payload["route"],
+                }
+            elif error_type == CLIENT_PROVIDER_ERROR_TYPE:
+                provider_id = payload.get("provider")
+                if (set(payload) != {"type", "route", "provider"} or payload.get("route") != "app"
+                        or not isinstance(provider_id, str) or provider_id not in PROVIDER_BY_ID):
+                    raise AdapterError("invalid_request")
+                event = {
+                    "level": "error", "event": "client_error", "code": "provider_request_failed",
+                    "type": error_type, "route": "app", "provider": provider_id,
+                }
+            else:
+                raise AdapterError("invalid_request")
+            LOGGER.error(json.dumps(event, separators=(",", ":"), sort_keys=True))
             return 202, {"accepted": True}
         elif route == "intelx":
             from web_adapter.intelx import validate_operation

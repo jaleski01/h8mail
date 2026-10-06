@@ -571,6 +571,20 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn("target", logs.getvalue())
         self.assertNotIn("stack", logs.getvalue())
 
+    def test_browser_provider_request_errors_are_logged_without_lookup_data(self):
+        logs = io.StringIO()
+        with redirect_stderr(logs):
+            status, _, response = self.request("POST", "/api/client-error", {
+                "type": "provider_lookup_error", "route": "app", "provider": "hunter",
+            })
+        self.assertEqual(status, 202)
+        self.assertEqual(response, {"accepted": True})
+        self.assertIn('"event":"client_error"', logs.getvalue())
+        self.assertIn('"code":"provider_request_failed"', logs.getvalue())
+        self.assertIn('"provider":"hunter"', logs.getvalue())
+        self.assertNotIn("target", logs.getvalue())
+        self.assertNotIn("example", logs.getvalue())
+
     def test_browser_error_endpoint_rejects_unbounded_client_fields(self):
         with patch("api.index.LOGGER.error") as log_error:
             status, _, response = self.request("POST", "/api/client-error", {
