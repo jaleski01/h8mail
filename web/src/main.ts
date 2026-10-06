@@ -2,11 +2,28 @@ import './styles.css';
 import { mountEngine } from './engine';
 import { lookupIntelX } from './intelx';
 import { appendChaseTargets, extractEmails, isEmailAddress, MAX_TARGETS, parseEmailTargets, toCsv, visibleValue, type ExportRecord, type RecordEntry } from './domain';
+import { makeProviderSearchPlan, type ProviderSearchJob, type SearchProvider } from './provider-search';
+
+type ClientErrorType = 'uncaught_exception' | 'unhandled_rejection';
+
+function reportClientError(type: ClientErrorType, route: 'app' | 'local'): void {
+    const body = new Blob([JSON.stringify({ type, route })], { type: 'application/json' });
+    try {
+        if (navigator.sendBeacon('/api/client-error', body)) return;
+    } catch {
+        // Fall through to fetch; the reporter must not interrupt the user action.
+    }
+    void fetch('/api/client-error', { method: 'POST', body, keepalive: true, credentials: 'omit', cache: 'no-store' })
+        .catch(() => undefined);
+}
+
+window.addEventListener('error', () => reportClientError('uncaught_exception', 'app'));
+window.addEventListener('unhandledrejection', () => reportClientError('unhandled_rejection', 'app'));
 
 type QueryType = 'email' | 'username' | 'domain' | 'ip' | 'hash' | 'password' | 'selector';
 type Mode = 'online' | 'local' | 'extract' | 'engine';
-interface CredentialField { key: string; label: string; type: 'password' | 'text'; required?: boolean }
-interface Provider { id: string; name: string; available: boolean; credentialFields: CredentialField[]; queryTypes: QueryType[]; description: string; unavailableReason?: string }
+interface CredentialField { key: string; label: string; type: 'password' | 'text'; required?: boolean; environmentVariable?: string; configured?: boolean; default?: string; options?: string[] }
+interface Provider extends SearchProvider { credentialFields: CredentialField[]; description: string; accessDescription?: string; unavailableReason?: string }
 interface Health { version: string; remoteEnabled: boolean; providers: Provider[]; localCompanion?: boolean; localAccessToken?: string; capabilities?: { maxTargets?: number; maxConcurrent?: number; urlExtraction?: boolean } }
 interface SearchResult { target: string; query?: QueryType; provider: string; status: 'found' | 'not_found' | 'error'; records: RecordEntry[]; count?: number; page?: number; total?: number; hasMore?: boolean; error?: { code: string; message: string }; truncated?: boolean; warnings?: { message: string }[] }
 interface LocalResponse { type: 'progress' | 'complete' | 'error'; id: number; records?: { target: string; source: string; field: string; value: string }[]; filesProcessed?: number; totalFiles?: number; bytesRead?: number; matches?: number; truncated?: boolean; warnings?: string[]; message?: string }
@@ -19,15 +36,13 @@ function element<T extends HTMLElement>(id: string): T {
 const onlineTargets = element<HTMLTextAreaElement>('online-targets');
 const localTargets = element<HTMLTextAreaElement>('local-targets');
 const querySelect = element<HTMLSelectElement>('query-type');
-const providerSelect = element<HTMLSelectElement>('provider');
-const accessKey = element<HTMLInputElement>('access-key');
 const showSensitive = element<HTMLInputElement>('show-sensitive');
 const resultContent = element('result-content');
 const queryTypes: QueryType[] = ['email', 'username', 'domain', 'ip', 'hash', 'password', 'selector'];
 const queryLabels: Record<QueryType, string> = { email: 'Email', username: 'Username', domain: 'Domain', ip: 'IP address', hash: 'Hash', password: 'Password', selector: 'Identifier' };
 let health: Health | null = null;
 let activeMode: Mode = 'online';
-let credentials = new Map<string, Record<string, string>>();
+let localAccessToken = '';
 let selectedFiles: File[] = [];
 let extracted: string[] = [];
 let results: SearchResult[] = [];
@@ -38,7 +53,7 @@ let runId = 0;
 let controller: AbortController | null = null;
 let localWorker: Worker | null = null;
 let fileReadGeneration = 0;
-const engine = mountEngine({ getAccessKey: () => accessKey.value.trim(), isBusy: () => running, onBusy: (busy) => { engineBusy = busy; running = busy; updateControls(); }, download });
+const engine = mountEngine({ getAccessKey: () => localAccessToken, isBusy: () => running, onBusy: (busy) => { engineBusy = busy; running = busy; updateControls(); }, download });
 mountExtendedInputs();
 
 function setMessage(id: string, message: string, tone: 'normal' | 'error' | 'success' = 'normal'): void {
@@ -64,83 +79,79 @@ function updateTargetCount(): void {
     element('target-count').textContent = `${count} / ${querySelect.value === 'email' ? MAX_TARGETS : 1}`;
 }
 
-function selectedProvider(): Provider | undefined { return health?.providers.find((provider) => provider.id === providerSelect.value); }
+function providersForQuery(query = querySelect.value): Provider[] {
+    return (health?.providers ?? []).filter((provider) => provider.available && provider.queryTypes.includes(query as QueryType));
+}
 
-function renderProvider(): void {
-    const provider = selectedProvider();
-    const fields = element('provider-credentials');
-    fields.replaceChildren();
-    querySelect.replaceChildren();
-    if (!provider) {
-        element('provider-description').textContent = 'Provider metadata is unavailable. Local tools remain available.';
+function renderProviderSummary(): void {
+    const compatible = providersForQuery();
+    const names = compatible.map((provider) => provider.name).join(', ');
+    const missingKeys = compatible.filter((provider) => provider.credentialFields.some((field) => field.required && !field.configured)).length;
+    element('provider-description').textContent = compatible.length
+        ? `${compatible.length} hosted providers support ${queryLabels[querySelect.value as QueryType] ?? 'this query'}. Every one runs automatically.`
+        : 'No hosted provider supports this query type.';
+    element('provider-summary').textContent = compatible.length
+        ? `${names}${missingKeys ? ` · ${missingKeys} need Vercel API keys` : ' · configured providers ready'}`
+        : 'Choose another query type or use the original local engine.';
+}
+
+function renderProviderGuide(): void {
+    const list = element('provider-guide-list');
+    list.replaceChildren();
+    if (!health) {
+        list.textContent = 'Reconnect to load provider setup information.';
         return;
     }
-    element('provider-description').textContent = provider.available ? provider.description : provider.unavailableReason ?? 'This provider is unavailable in the current engine.';
-    const previousQuery = querySelect.dataset.current ?? 'email';
-    for (const query of provider.queryTypes) {
-        const option = document.createElement('option');
-        option.value = query;
-        option.textContent = queryLabels[query];
-        querySelect.append(option);
-    }
-    querySelect.value = provider.queryTypes.includes(previousQuery as QueryType) ? previousQuery : provider.queryTypes[0] ?? 'email';
-    const providerValues = credentials.get(provider.id) ?? {};
-    for (const field of provider.credentialFields) {
-        const container = document.createElement('div');
-        const label = document.createElement('label');
-        label.className = 'field-label';
-        label.htmlFor = `credential-${field.key}`;
-        label.textContent = `${field.label}${field.required ? ' (required)' : ' (optional)'}`;
-        const input = document.createElement('input');
-        input.id = `credential-${field.key}`;
-        input.type = field.type;
-        input.autocomplete = 'off';
-        input.spellcheck = false;
-        input.autocapitalize = 'none';
-        input.value = providerValues[field.key] ?? '';
-        input.required = Boolean(field.required);
-        input.addEventListener('input', () => {
-            const current = credentials.get(provider.id) ?? {};
-            current[field.key] = input.value;
-            credentials.set(provider.id, current);
-        });
-        container.append(label, input);
-        if (provider.id === 'intelx' && field.key === 'apiTier') {
-            const tier = document.createElement('select');
-            tier.id = input.id;
-            for (const [value, name] of [['paid', 'Paid API (2.intelx.io)'], ['free', 'Free API (free.intelx.io)']]) {
-                if (!value || !name) continue;
-                const option = document.createElement('option');
-                option.value = value;
-                option.textContent = name;
-                tier.append(option);
-            }
-            tier.value = providerValues[field.key] || 'paid';
-            tier.addEventListener('change', () => { const current = credentials.get(provider.id) ?? {}; current[field.key] = tier.value; credentials.set(provider.id, current); });
-            input.replaceWith(tier);
+    for (const provider of health.providers) {
+        const entry = document.createElement('article');
+        entry.className = 'provider-guide-entry';
+        const summary = document.createElement('div');
+        const name = document.createElement('span');
+        name.className = 'provider-guide-name';
+        name.textContent = provider.name;
+        const state = document.createElement('span');
+        const keyConfigured = provider.credentialFields.some((field) => field.key === 'apiKey' && field.configured);
+        state.className = `provider-guide-state${provider.available && !keyConfigured ? ' missing' : ''}${provider.available ? '' : ' unavailable'}`;
+        state.textContent = provider.available ? (keyConfigured ? 'KEY CONFIGURED' : 'KEY NEEDED') : 'WEB UNAVAILABLE';
+        name.append(state);
+        const description = document.createElement('p');
+        description.textContent = provider.available ? (provider.accessDescription || provider.description) : provider.unavailableReason || 'Unavailable in the hosted adapter.';
+        summary.append(name, description);
+        const keys = document.createElement('div');
+        keys.className = 'provider-guide-keys';
+        for (const field of provider.credentialFields) {
+            if (!field.environmentVariable) continue;
+            const row = document.createElement('div');
+            row.className = 'provider-guide-key';
+            const variable = document.createElement('code');
+            variable.textContent = field.environmentVariable;
+            const copy = document.createElement('button');
+            copy.type = 'button';
+            copy.className = 'provider-copy-button';
+            copy.textContent = 'Copy name';
+            copy.setAttribute('aria-label', `Copy Vercel variable name ${field.environmentVariable}`);
+            copy.addEventListener('click', () => { void copyEnvironmentVariable(field.environmentVariable ?? ''); });
+            row.append(variable, copy);
+            keys.append(row);
         }
-        fields.append(container);
+        if (!provider.credentialFields.length) {
+            const note = document.createElement('span');
+            note.className = 'provider-guide-empty';
+            note.textContent = provider.available ? 'No key configured for this adapter.' : 'No hosted key is supported.';
+            keys.append(note);
+        }
+        entry.append(summary, keys);
+        list.append(entry);
     }
-    if (provider.id === 'intelx') {
-        const label = document.createElement('label');
-        label.className = 'field-label';
-        label.htmlFor = 'intelx-file-limit';
-        label.textContent = 'Maximum files to read (1–25)';
-        const limit = document.createElement('input');
-        limit.id = 'intelx-file-limit';
-        limit.type = 'number';
-        limit.min = '1';
-        limit.max = '25';
-        limit.value = '10';
-        const hint = document.createElement('p');
-        hint.className = 'field-hint';
-        hint.textContent = 'IntelX searches poll for up to 60 seconds. Limited or incomplete searches are explicitly reported.';
-        fields.append(label, limit, hint);
+}
+
+async function copyEnvironmentVariable(variable: string): Promise<void> {
+    try {
+        await navigator.clipboard.writeText(variable);
+        setMessage('provider-guide-status', `${variable} copied. Add it as a Vercel environment variable name.`, 'success');
+    } catch {
+        setMessage('provider-guide-status', `Clipboard access failed. Copy the variable name manually: ${variable}`, 'error');
     }
-    element('credentials-summary').textContent = provider.credentialFields.some((field) => field.required) ? 'REQUIRED' : 'OPTIONAL';
-    element<HTMLDetailsElement>('credentials-details').open = provider.credentialFields.some((field) => field.required && !providerValues[field.key]);
-    updateQuery();
-    updateControls();
 }
 
 function updateQuery(): void {
@@ -150,13 +161,13 @@ function updateQuery(): void {
     element('target-hint').textContent = query === 'email' ? 'Separate email addresses with a new line, comma, or space.' : 'Custom queries use one target per lookup. Provider support varies.';
     onlineTargets.placeholder = query === 'email' ? 'name@example.com\nOne address per line, up to 10.' : `Enter one ${queryLabels[query]?.toLowerCase() ?? 'target'}`;
     updateTargetCount();
+    renderProviderSummary();
 }
 
 function updateControls(): void {
-    element<HTMLButtonElement>('online-submit').disabled = running || !health?.remoteEnabled || !selectedProvider()?.available;
+    element<HTMLButtonElement>('online-submit').disabled = running || !health?.remoteEnabled || !providersForQuery().length;
     element<HTMLButtonElement>('local-submit').disabled = running;
     element<HTMLButtonElement>('extract-submit').disabled = running;
-    providerSelect.disabled = running || !health;
     querySelect.disabled = running || !health;
     for (const button of document.querySelectorAll<HTMLButtonElement>('.cancel-button')) button.hidden = !running;
     for (const button of document.querySelectorAll<HTMLButtonElement>('.pagination-button')) button.disabled = running;
@@ -175,9 +186,11 @@ function parseHealth(value: unknown): Health {
         const supportedQueries = entry.queryTypes.filter((query: unknown): query is QueryType => typeof query === 'string' && queryTypes.includes(query as QueryType));
         const fields = entry.credentialFields.map((field: unknown): CredentialField => {
             if (!isObject(field) || typeof field.key !== 'string' || typeof field.label !== 'string' || (field.type !== 'password' && field.type !== 'text')) throw new Error('The server returned invalid credential fields.');
-            return { key: field.key, label: field.label, type: field.type, required: field.required === true };
+            if (field.environmentVariable !== undefined && (typeof field.environmentVariable !== 'string' || !/^[A-Z][A-Z0-9_]*$/.test(field.environmentVariable))) throw new Error('The server returned invalid provider setup metadata.');
+            const options = Array.isArray(field.options) ? field.options.filter((option: unknown): option is string => typeof option === 'string') : undefined;
+            return { key: field.key, label: field.label, type: field.type, required: field.required === true, environmentVariable: typeof field.environmentVariable === 'string' ? field.environmentVariable : undefined, configured: field.configured === true, default: typeof field.default === 'string' ? field.default : undefined, options };
         });
-        return { id: entry.id, name: entry.name, description: entry.description, available: entry.available !== false, queryTypes: supportedQueries, credentialFields: fields, unavailableReason: typeof entry.unavailableReason === 'string' ? entry.unavailableReason : undefined };
+        return { id: entry.id, name: entry.name, description: entry.description, accessDescription: typeof entry.accessDescription === 'string' ? entry.accessDescription : undefined, available: entry.available !== false, queryTypes: supportedQueries, credentialFields: fields, unavailableReason: typeof entry.unavailableReason === 'string' ? entry.unavailableReason : undefined };
     });
     return { version: value.version, remoteEnabled: value.remoteEnabled, providers, localCompanion: value.localCompanion === true, localAccessToken: typeof value.localAccessToken === 'string' ? value.localAccessToken : undefined, capabilities: isObject(value.capabilities) ? { urlExtraction: value.capabilities.urlExtraction === true } : undefined };
 }
@@ -191,24 +204,24 @@ async function loadHealth(): Promise<void> {
         if (!response.ok) throw new Error('The deployment could not load provider information.');
         health = parseHealth(await response.json());
         engine.configure(Boolean(health.localCompanion));
-        if (health.localCompanion && health.localAccessToken) accessKey.value = health.localAccessToken;
+        localAccessToken = health.localCompanion ? health.localAccessToken ?? '' : '';
         element('engine-version').textContent = `ENGINE ${health.version} / WEB`;
-        element('service-status').textContent = health.remoteEnabled ? 'Services ready' : 'Local tools ready';
+        element('service-status').textContent = health.remoteEnabled ? 'Search API online' : 'Local tools ready';
         element('service-status').className = `service-status ${health.remoteEnabled ? 'ready' : 'offline'}`;
-        providerSelect.replaceChildren();
-        for (const provider of health.providers) {
+        const previousQuery = querySelect.dataset.current ?? querySelect.value ?? 'email';
+        const supportedQueries = queryTypes.filter((query) => health?.providers.some((provider) => provider.available && provider.queryTypes.includes(query)));
+        querySelect.replaceChildren();
+        for (const query of supportedQueries) {
             const option = document.createElement('option');
-            option.value = provider.id;
-            option.textContent = `${provider.name}${provider.available ? '' : ' — unavailable'}`;
-            option.disabled = !provider.available;
-            providerSelect.append(option);
+            option.value = query;
+            option.textContent = queryLabels[query];
+            querySelect.append(option);
         }
-        const firstAvailable = health.providers.find((provider) => provider.available);
-        if (firstAvailable) providerSelect.value = firstAvailable.id;
-        element('remote-notice').hidden = health.remoteEnabled;
-        element('remote-notice').textContent = 'Online lookup needs one deployment setting: H8MAIL_ACCESS_TOKEN (at least 16 characters). Local files and pasted-text extraction work immediately.';
+        querySelect.value = supportedQueries.includes(previousQuery as QueryType) ? previousQuery : supportedQueries[0] ?? 'email';
+        element('remote-notice').hidden = true;
         element('retry-connection').hidden = true;
-        renderProvider();
+        renderProviderGuide();
+        updateQuery();
     } catch (error: unknown) {
         health = null;
         element('service-status').textContent = 'Server unavailable';
@@ -216,7 +229,7 @@ async function loadHealth(): Promise<void> {
         element('remote-notice').hidden = false;
         element('remote-notice').textContent = error instanceof Error && error.name !== 'AbortError' ? error.message : 'The server connection timed out. Local tools remain available.';
         element('retry-connection').hidden = false;
-        element('provider-description').textContent = 'Reconnect to load providers. You can still search local files and extract pasted addresses.';
+        element('provider-description').textContent = 'Reconnect to load provider status. Local files and pasted-text extraction remain available.';
     } finally {
         window.clearTimeout(timer);
         updateControls();
@@ -303,72 +316,76 @@ function validateTargets(text: string, query: QueryType): string[] {
 async function runOnline(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (running) return;
-    const provider = selectedProvider();
-    if (!provider || !health?.remoteEnabled) return;
+    if (!health?.remoteEnabled) return;
     let targets: string[];
     const query = querySelect.value as QueryType;
-    const providerCredentials = { ...(credentials.get(provider.id) ?? {}) };
+    const compatible = providersForQuery(query);
     try {
         targets = validateTargets(onlineTargets.value, query);
-        if (!accessKey.value.trim()) throw new Error('Enter the deployment access key.');
-        const missing = provider.credentialFields.find((field) => field.required && !providerCredentials[field.key]?.trim());
-        if (missing) {
-            element<HTMLDetailsElement>('credentials-details').open = true;
-            element<HTMLInputElement>(`credential-${missing.key}`).focus();
-            throw new Error(`Enter ${missing.label} for ${provider.name}.`);
-        }
+        if (!compatible.length) throw new Error('No hosted provider supports this query type.');
     } catch (error: unknown) {
         setMessage('online-message', error instanceof Error ? error.message : 'Check the search input.', 'error');
         return;
     }
-    const key = accessKey.value.trim();
     const chaseEnabled = query === 'email' && element<HTMLInputElement>('chase-enabled').checked;
     const powerChase = element<HTMLInputElement>('power-chase').checked;
     const chaseLimit = Math.min(25, Math.max(targets.length, Number(element<HTMLInputElement>('chase-limit').value) || 10));
     const seen = new Set(targets);
     const id = beginRun();
     const signal = controller?.signal;
-    setMessage('online-message', `Searching ${targets.length} target${targets.length === 1 ? '' : 's'} with ${provider.name}…`);
+    setMessage('online-message', `Searching ${targets.length} target${targets.length === 1 ? '' : 's'} with all ${compatible.length} compatible providers…`);
     let nextIndex = 0;
     let completed = 0;
-    const ordered: (SearchResult | undefined)[] = new Array(targets.length);
+    const ordered: (SearchResult | undefined)[] = [];
+    const queue: Array<ProviderSearchJob & { resultIndex: number }> = [];
+    const enqueue = (jobs: readonly ProviderSearchJob[]): void => {
+        for (const job of jobs) {
+            queue.push({ ...job, resultIndex: ordered.length });
+            ordered.push(undefined);
+        }
+    };
+    enqueue(makeProviderSearchPlan(targets, compatible, query));
     const searchNext = async (): Promise<void> => {
-        while (id === runId && nextIndex < targets.length) {
-            const index = nextIndex++;
-            const target = targets[index];
-            if (!target) return;
+        while (id === runId && nextIndex < queue.length) {
+            const job = queue[nextIndex++];
+            if (!job) return;
             let result: SearchResult;
             try {
-                if (provider.id === 'intelx' && signal) {
+                if (job.provider.id === 'intelx' && signal) {
                     const fileLimit = Number(element<HTMLInputElement>('intelx-file-limit').value);
-                    result = { ...await lookupIntelX(target, query, providerCredentials, key, signal, Math.min(25, Math.max(1, Number.isInteger(fileLimit) ? fileLimit : 10))), query };
+                    result = { ...await lookupIntelX(job.target, query, signal, Math.min(25, Math.max(1, Number.isInteger(fileLimit) ? fileLimit : 10))), query };
                 } else {
-                    const response = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify({ target, query, provider: provider.id, credentials: providerCredentials, hidePasswords: true, page: 1 }), signal, credentials: 'omit', cache: 'no-store' });
+                    const response = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target: job.target, query, provider: job.provider.id, hidePasswords: true, page: 1 }), signal, credentials: 'omit', cache: 'no-store' });
                     const payload: unknown = await response.json();
                     if (!response.ok) throw new Error(errorMessage(payload, `Lookup failed (HTTP ${response.status}).`));
-                    result = parseSearchResult(payload, target, provider.name);
+                    result = parseSearchResult(payload, job.target, job.provider.name);
                 }
             } catch (error: unknown) {
                 if (id !== runId || signal?.aborted) return;
-                result = { target, query, provider: provider.name, status: 'error', records: [], error: { code: 'REQUEST_FAILED', message: error instanceof Error ? error.message : 'The server could not complete this lookup.' } };
+                result = { target: job.target, query, provider: job.provider.name, status: 'error', records: [], error: { code: 'REQUEST_FAILED', message: error instanceof Error ? error.message : 'The server could not complete this lookup.' } };
             }
             if (id !== runId) return;
-            ordered[index] = result;
-            if (chaseEnabled && result.status === 'found' && (powerChase || provider.id === 'hunter')) {
+            ordered[job.resultIndex] = result;
+            if (chaseEnabled && result.status === 'found' && (powerChase || job.provider.id === 'hunter')) {
+                const previousTargetCount = targets.length;
                 const truncated = appendChaseTargets(targets, seen, result.records, chaseLimit, powerChase);
+                if (targets.length > previousTargetCount) {
+                    const discovered = targets.slice(previousTargetCount);
+                    enqueue(makeProviderSearchPlan(discovered, compatible, query));
+                }
                 if (truncated && !runWarnings.includes('Chase stopped at the configured target limit. Some related addresses were not queried.')) runWarnings.push('Chase stopped at the configured target limit. Some related addresses were not queried.');
             }
             completed += 1;
             results = ordered.filter((entry): entry is SearchResult => Boolean(entry));
             const progress = document.getElementById('run-progress-text');
-            if (progress) progress.textContent = `${completed} / ${targets.length} targets completed${chaseEnabled ? ' · bounded chase enabled' : ''}.`;
-            element('results-announcement').textContent = `${completed} of ${targets.length} targets completed.`;
+            if (progress) progress.textContent = `${completed} / ${queue.length} provider lookups completed${chaseEnabled ? ' · bounded chase enabled' : ''}.`;
+            element('results-announcement').textContent = `${completed} of ${queue.length} provider lookups completed.`;
         }
     };
-    await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => searchNext()));
+    await Promise.all(Array.from({ length: Math.min(3, queue.length) }, () => searchNext()));
     if (id === runId) {
         const errors = results.filter((result) => result.status === 'error').length;
-        setMessage('online-message', `${completed} target${completed === 1 ? '' : 's'} completed${errors ? `; ${errors} failed. See individual errors below.` : '.'}`, errors ? 'error' : 'success');
+        setMessage('online-message', `${completed} provider lookups completed${errors ? `; ${errors} failed. See each provider's result below.` : '.'}`, errors ? 'error' : 'success');
         finishRun(id);
     }
 }
@@ -444,9 +461,8 @@ function runLocal(event: SubmitEvent): void {
 async function loadNextPage(index: number, expected: SearchResult, button: HTMLButtonElement): Promise<void> {
     if (running || results[index] !== expected || !expected.hasMore) return;
     const provider = health?.providers.find((entry) => entry.name === expected.provider);
-    const key = accessKey.value.trim();
-    if (!provider || !key || !expected.query) {
-        expected.warnings = [{ message: 'Enter the deployment access key and provider credentials before loading another page.' }, ...(expected.warnings ?? [])];
+    if (!provider || !expected.query) {
+        expected.warnings = [{ message: 'Provider setup information is unavailable. Reconnect before loading another page.' }, ...(expected.warnings ?? [])];
         renderResults();
         return;
     }
@@ -459,10 +475,9 @@ async function loadNextPage(index: number, expected: SearchResult, button: HTMLB
     try {
         const response = await fetch('/api/search', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target: expected.target, query: expected.query, provider: provider.id,
-                credentials: credentials.get(provider.id) ?? {}, hidePasswords: true,
-                page: (expected.page ?? 1) + 1 }),
+                hidePasswords: true, page: (expected.page ?? 1) + 1 }),
             signal: controller.signal, credentials: 'omit', cache: 'no-store',
         });
         const payload: unknown = await response.json();
@@ -494,10 +509,13 @@ async function loadNextPage(index: number, expected: SearchResult, button: HTMLB
 function renderResults(): void {
     resultContent.replaceChildren();
     const recordCount = results.reduce((total, result) => total + result.records.length, 0);
+    const targetCount = new Set(results.map((result) => result.target)).size;
     const errors = results.filter((result) => result.status === 'error').length;
-    element('results-title').textContent = results.length ? `${recordCount} record${recordCount === 1 ? '' : 's'} / ${results.length} target${results.length === 1 ? '' : 's'}` : runWarnings.length ? 'Search stopped.' : 'Your results appear here.';
+    element('results-title').textContent = results.length
+        ? `${recordCount} record${recordCount === 1 ? '' : 's'} / ${targetCount} target${targetCount === 1 ? '' : 's'} / ${results.length} provider lookup${results.length === 1 ? '' : 's'}`
+        : runWarnings.length ? 'Search stopped.' : 'Your results appear here.';
     element('export-controls').hidden = !recordCount;
-    element('results-announcement').textContent = `${recordCount} records across ${results.length} targets. ${errors} errors.`;
+    element('results-announcement').textContent = `${recordCount} records across ${targetCount} targets and ${results.length} provider lookups. ${errors} errors.`;
     if (!results.length) {
         const empty = document.createElement('div');
         empty.className = 'empty-state';
@@ -637,7 +655,6 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('.tab')) {
         if (next) { event.preventDefault(); setMode(next.dataset.mode as Mode, true); }
     });
 }
-providerSelect.addEventListener('change', renderProvider);
 querySelect.addEventListener('change', updateQuery);
 querySelect.addEventListener('change', updateControls);
 onlineTargets.addEventListener('input', updateTargetCount);
@@ -645,10 +662,8 @@ element('retry-connection').addEventListener('click', () => { void loadHealth();
 for (const button of document.querySelectorAll<HTMLButtonElement>('.cancel-button')) button.addEventListener('click', () => cancelRun());
 element('online-clear').addEventListener('click', () => {
     cancelRun(false);
-    credentials.clear();
     fileReadGeneration += 1;
     engine.clear();
-    accessKey.value = '';
     onlineTargets.value = '';
     localTargets.value = '';
     element<HTMLTextAreaElement>('extract-text').value = '';
@@ -661,9 +676,9 @@ element('online-clear').addEventListener('click', () => {
     element<HTMLInputElement>('local-files').value = '';
     element<HTMLInputElement>('local-folder').value = '';
     element('file-summary').textContent = 'No files selected.';
-    renderProvider();
+    renderProviderGuide();
     renderResults();
-    setMessage('online-message', 'Session cleared. Targets, credentials, files, and results were discarded.');
+    setMessage('online-message', 'Session cleared. Targets, files, and results were discarded.');
 });
 element('local-clear').addEventListener('click', () => {
     cancelRun();
@@ -697,7 +712,7 @@ element<HTMLInputElement>('extract-file').addEventListener('change', async (even
 element('extract-clear').addEventListener('click', () => { fileReadGeneration += 1; element<HTMLTextAreaElement>('extract-text').value = ''; element<HTMLTextAreaElement>('extract-urls').value = ''; extracted = []; element('extraction-output').hidden = true; setMessage('extract-message', ''); });
 element('use-extracted').addEventListener('click', () => {
     onlineTargets.value = extracted.slice(0, MAX_TARGETS).join('\n');
-    if (selectedProvider()?.queryTypes.includes('email')) { querySelect.value = 'email'; updateQuery(); }
+    if (providersForQuery('email').length) { querySelect.value = 'email'; updateQuery(); }
     updateTargetCount();
     setMode('online');
     onlineTargets.focus();
@@ -707,7 +722,7 @@ element('download-extracted').addEventListener('click', () => download(extracted
 showSensitive.addEventListener('change', renderResults);
 element('export-json').addEventListener('click', () => download(JSON.stringify(exportRecords(), null, 2), 'h8mail-results.json', 'application/json'));
 element('export-csv').addEventListener('click', () => download(toCsv(exportRecords()), 'h8mail-results.csv', 'text/csv;charset=utf-8'));
-window.addEventListener('pagehide', () => { cancelRun(false); credentials.clear(); accessKey.value = ''; });
+window.addEventListener('pagehide', () => { cancelRun(false); localAccessToken = ''; });
 void loadHealth();
 
 function mountExtendedInputs(): void {
@@ -721,10 +736,10 @@ function mountExtendedInputs(): void {
     const extractLabel = element('panel-extract').querySelector('.provider-column .section-label .mono');
     if (extractLabel) extractLabel.textContent = 'TEXT STAYS LOCAL';
     const extractScope = element('panel-extract').querySelector('.limit-note p');
-    if (extractScope) extractScope.textContent = 'Up to 1,000 unique addresses. Pasted text and files are processed locally. Public HTTPS pages are fetched through the server with your deployment access key.';
+    if (extractScope) extractScope.textContent = 'Up to 1,000 unique addresses. Pasted text and files are processed locally. Public HTTPS pages are fetched through the server.';
     const onlineExtras = document.createElement('div');
     onlineExtras.className = 'query-extras';
-    onlineExtras.innerHTML = `<label class="text-button file-picker" for="online-target-file">Read targets from a file ↑<input id="online-target-file" type="file" accept=".txt,.csv,.log" /></label><details class="chase-settings"><summary>Follow related targets</summary><div class="chase-fields"><label class="checkbox-label"><input id="chase-enabled" type="checkbox" />Enable bounded chase</label><label class="checkbox-label"><input id="power-chase" type="checkbox" />Use every returned email field (power chase)</label><label class="field-label" for="chase-limit">Maximum total targets, including the initial list</label><input id="chase-limit" type="number" min="1" max="25" value="10" /><p class="field-hint">Hunter related emails by default. Power chase searches addresses returned by any selected provider. Up to 25 targets, deduplicated, using the same provider and credentials.</p></div></details>`;
+    onlineExtras.innerHTML = `<label class="text-button file-picker" for="online-target-file">Read targets from a file ↑<input id="online-target-file" type="file" accept=".txt,.csv,.log" /></label><details class="chase-settings"><summary>Follow related targets</summary><div class="chase-fields"><label class="checkbox-label"><input id="chase-enabled" type="checkbox" />Enable bounded chase</label><label class="checkbox-label"><input id="power-chase" type="checkbox" />Use every returned email field (power chase)</label><label class="field-label" for="chase-limit">Maximum total targets, including the initial list</label><input id="chase-limit" type="number" min="1" max="25" value="10" /><p class="field-hint">Hunter related emails by default. Power chase searches addresses returned by any provider. Every discovered address is checked across all compatible providers, up to 25 targets.</p></div></details>`;
     element('target-hint').after(onlineExtras);
     const localExtras = document.createElement('label');
     localExtras.className = 'checkbox-label local-loose';
@@ -740,7 +755,7 @@ function mountExtendedInputs(): void {
     });
     const urls = document.createElement('div');
     urls.className = 'url-extraction';
-    urls.innerHTML = `<label class="field-label" for="extract-urls">Or extract from public HTTPS pages</label><textarea id="extract-urls" rows="3" placeholder="https://example.com/contact&#10;Up to 10 URLs, one per line." spellcheck="false"></textarea><button id="extract-urls-button" class="button secondary" type="button" disabled>Fetch page addresses <span aria-hidden="true">↗</span></button><button id="extract-urls-cancel" class="text-button" type="button" hidden>Cancel extraction</button><p class="field-hint">Requires the deployment access key entered in Online lookup. The server fetches public HTTPS pages; pasted text stays local.</p>`;
+    urls.innerHTML = `<label class="field-label" for="extract-urls">Or extract from public HTTPS pages</label><textarea id="extract-urls" rows="3" placeholder="https://example.com/contact&#10;Up to 10 URLs, one per line." spellcheck="false"></textarea><button id="extract-urls-button" class="button secondary" type="button" disabled>Fetch page addresses <span aria-hidden="true">↗</span></button><button id="extract-urls-cancel" class="text-button" type="button" hidden>Cancel extraction</button><p class="field-hint">The server fetches only public HTTPS pages and rejects private or local network addresses. Pasted text stays on your device.</p>`;
     element('panel-extract').querySelector('.provider-column')?.append(urls);
     element<HTMLInputElement>('online-target-file').addEventListener('change', async (event) => {
         const input = event.target as HTMLInputElement;
@@ -765,12 +780,10 @@ function mountExtendedInputs(): void {
 async function extractUrls(): Promise<void> {
     if (running || !health?.remoteEnabled || !health.capabilities?.urlExtraction) return;
     const urls = [...new Set(element<HTMLTextAreaElement>('extract-urls').value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
-    if (!accessKey.value.trim()) { setMessage('extract-message', 'Enter the deployment access key in Online lookup first.', 'error'); return; }
     if (!urls.length || urls.length > 10 || urls.some((url) => { try { return new URL(url).protocol !== 'https:'; } catch { return true; } })) { setMessage('extract-message', 'Enter between 1 and 10 complete public HTTPS URLs, one per line.', 'error'); return; }
     const id = ++runId;
     running = true;
     controller = new AbortController();
-    const key = accessKey.value.trim();
     updateControls();
     element('extract-urls-cancel').hidden = false;
     const emails = new Set(extracted);
@@ -779,7 +792,7 @@ async function extractUrls(): Promise<void> {
         if (id !== runId) break;
         setMessage('extract-message', `Fetching page ${index + 1} / ${urls.length}…`);
         try {
-            const response = await fetch('/api/extract', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify({ url }), signal: controller.signal, credentials: 'omit', cache: 'no-store' });
+            const response = await fetch('/api/extract', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }), signal: controller.signal, credentials: 'omit', cache: 'no-store' });
             const payload: unknown = await response.json();
             if (!response.ok) throw new Error(errorMessage(payload, `Page ${index + 1} failed (HTTP ${response.status}).`));
             if (!isObject(payload) || !Array.isArray(payload.emails) || payload.emails.some((email: unknown) => typeof email !== 'string')) throw new Error(`Page ${index + 1} returned malformed extraction data.`);

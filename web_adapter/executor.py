@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from .contracts import MAX_RECORDS, SearchRequest, result
+from .providers import PROVIDERS
 
 WORKER_TIMEOUT = 25
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,6 +16,11 @@ ROOT = Path(__file__).resolve().parent.parent
 def execute_search(request: SearchRequest) -> dict:
     environment = os.environ.copy()
     environment.pop("H8MAIL_ACCESS_TOKEN", None)
+    for provider in PROVIDERS:
+        for field in provider["credentialFields"]:
+            variable = field.get("environmentVariable")
+            if variable:
+                environment.pop(variable, None)
     environment["PYTHONIOENCODING"] = "utf-8"
     try:
         worker = subprocess.run(

@@ -18,17 +18,21 @@ from web_adapter.contracts import MAX_RECORDS, result, validate_request
 from web_adapter.engine import run_search
 from web_adapter.errors import AdapterError
 from web_adapter.executor import execute_search
-from web_adapter.providers import PROVIDERS
+from web_adapter.providers import PROVIDERS, PROVIDER_BY_ID
 from web_adapter.transport import MAX_RESPONSE_BYTES, Transport
 
 
-TOKEN = "synthetic-workspace-token-for-tests"
 KEY = "00000000000000000000000000000000"
 
 
 def search_request(provider="snusbase", query="email", target="analyst@example.test", **options):
-    return validate_request({"target": target, "query": query, "provider": provider,
-                             "credentials": {"apiKey": KEY}, **options})
+    credentials = {field["key"]: field.get("default", KEY)
+                   for field in PROVIDER_BY_ID[provider]["credentialFields"]}
+    return validate_request({"target": target, "query": query, "provider": provider, **options}, credentials)
+
+
+def public_search_payload(provider="snusbase", query="email", target="analyst@example.test", **options):
+    return {"target": target, "query": query, "provider": provider, **options}
 
 
 class SyntheticResponse(requests.Response):
@@ -66,34 +70,38 @@ class ContractTests(unittest.TestCase):
 
     def test_pagination_is_bounded_to_providers_that_support_it(self):
         for payload in (
-            {"target": "analyst@example.test", "provider": "snusbase", "page": 2,
-             "credentials": {"apiKey": KEY}},
-            {"target": "analyst@example.test", "provider": "dehashed", "page": 101,
-             "credentials": {"apiKey": KEY}},
-            {"target": "analyst@example.test", "provider": "hunter", "page": 2},
-            {"target": "analyst@example.test", "provider": "hunter", "page": True,
-             "credentials": {"apiKey": KEY}},
+            public_search_payload("snusbase", page=2),
+            public_search_payload("dehashed", page=101),
+            public_search_payload("hunter", page=True),
         ):
             with self.subTest(payload=payload), self.assertRaises(AdapterError):
-                validate_request(payload)
+                validate_request(payload, {"apiKey": KEY})
 
-    def test_optional_credentials_and_hibp_format(self):
-        request = validate_request({"target": "analyst@example.test", "provider": "hunter"})
-        self.assertEqual(request.credentials, {"apiKey": ""})
+    def test_provider_credentials_are_server_only_and_required(self):
+        with self.assertRaises(AdapterError) as missing:
+            validate_request(public_search_payload("hunter"))
+        self.assertEqual(missing.exception.code, "provider_not_configured")
+        with self.assertRaises(AdapterError):
+            validate_request({**public_search_payload("hunter"), "credentials": {"apiKey": KEY}}, {"apiKey": KEY})
+        request = validate_request(public_search_payload("hunter"), {"apiKey": KEY})
+        self.assertEqual(request.credentials, {"apiKey": KEY})
         for provider in ("hibp", "hibp_pastes", "snusbase"):
             with self.assertRaises(AdapterError):
-                validate_request({"target": "analyst@example.test", "provider": provider})
+                validate_request(public_search_payload(provider))
         with self.assertRaises(AdapterError):
-            validate_request({"target": "analyst@example.test", "provider": "hibp",
-                              "credentials": {"apiKey": "bad"}})
+            validate_request(public_search_payload("hibp"), {"apiKey": "bad"})
 
-    def test_health_does_not_disclose_configured_access_token(self):
-        for token, expected in (("", False), ("short", False), (TOKEN, True)):
-            with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": token}):
-                metadata = health()
-            self.assertEqual(metadata["remoteEnabled"], expected)
-            self.assertNotIn(TOKEN, json.dumps(metadata))
-            self.assertEqual(metadata["version"], metadata["engine"]["version"])
+    def test_health_shows_only_provider_key_configuration_booleans(self):
+        secret = "secret-provider-key-that-must-never-leak"
+        with patch.dict(os.environ, {"SNUSBASE_API_KEY": secret, "HIBP_API_KEY": KEY}):
+            metadata = health()
+        self.assertTrue(metadata["remoteEnabled"])
+        self.assertNotIn(secret, json.dumps(metadata))
+        self.assertNotIn(KEY, json.dumps(metadata))
+        providers = {entry["id"]: entry for entry in metadata["providers"]}
+        self.assertTrue(providers["snusbase"]["credentialFields"][0]["configured"])
+        self.assertTrue(providers["hibp"]["credentialFields"][0]["configured"])
+        self.assertEqual(metadata["version"], metadata["engine"]["version"])
 
 
 class TransportTests(unittest.TestCase):
@@ -220,11 +228,13 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(response["count"], 1)
         self.assertIn({"source": "EMAILREP", "field": "references", "value": "5"}, response["records"])
 
-    def test_hunter_public_reports_domain_count_and_private_reports_related_addresses(self):
-        public_request = validate_request({"target": "analyst@example.test", "provider": "hunter"})
-        response, _ = self.run_provider(public_request, [SyntheticResponse({"data": {"total": 7}})])
+    def test_hunter_reports_domain_count_and_related_addresses(self):
+        public_request = search_request("hunter")
+        response, _ = self.run_provider(public_request, [SyntheticResponse({
+            "data": {"emails": []}, "meta": {"results": 7},
+        })])
         self.assertEqual(response["count"], 7)
-        self.assertEqual(response["records"][0]["field"], "domain_email_count")
+        self.assertEqual(response["records"], [])
         response, _ = self.run_provider(search_request("hunter"), [SyntheticResponse({
             "data": {"emails": [{"value": "related@example.test"}]}, "meta": {"results": 3},
         })])
@@ -374,17 +384,21 @@ class EngineTests(unittest.TestCase):
 
 
 class ExecutorTests(unittest.TestCase):
-    def test_worker_uses_stdin_and_has_deadline_without_access_token(self):
+    def test_worker_uses_stdin_and_does_not_inherit_provider_keys(self):
         request = search_request()
         expected = result(request, [], 0)
         completed = subprocess.CompletedProcess([], 0, json.dumps(expected), "private stderr")
-        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": TOKEN}), patch(
+        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": "local-only-token",
+                                    "SNUSBASE_API_KEY": KEY, "HIBP_API_KEY": KEY}), patch(
             "web_adapter.executor.subprocess.run", return_value=completed
         ) as execute:
             self.assertEqual(execute_search(request), expected)
         call = execute.call_args
         self.assertNotIn(KEY, " ".join(call.args[0]))
+        self.assertNotIn("SNUSBASE_API_KEY", call.kwargs["env"])
+        self.assertNotIn("HIBP_API_KEY", call.kwargs["env"])
         self.assertNotIn("H8MAIL_ACCESS_TOKEN", call.kwargs["env"])
+        self.assertIn(KEY, call.kwargs["input"])
         self.assertEqual(call.kwargs["timeout"], 25)
         self.assertTrue(call.kwargs["capture_output"])
 
@@ -420,9 +434,9 @@ class HttpTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join()
 
-    def request(self, method, route, payload=None, token=TOKEN, body=None, headers=None):
+    def request(self, method, route, payload=None, body=None, headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
-        outgoing_headers = {"Content-Type": "application/json", "Authorization": "Bearer " + token}
+        outgoing_headers = {"Content-Type": "application/json"}
         outgoing_headers.update(headers or {})
         connection.request(method, route, body=json.dumps(payload) if body is None and payload is not None else body,
                            headers=outgoing_headers)
@@ -432,44 +446,84 @@ class HttpTests(unittest.TestCase):
         connection.close()
         return result
 
-    def test_health_and_routes_work_without_access_and_do_not_cache(self):
-        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": ""}):
-            status, headers, response = self.request("GET", "/api/health", token="")
-            self.assertEqual(status, 200)
-            self.assertFalse(response["remoteEnabled"])
-            self.assertEqual(headers["Cache-Control"], "no-store, private")
-            self.assertEqual(self.request("GET", "/api?route=health")[0], 200)
-            self.assertEqual(self.request("GET", "/api/search")[0], 405)
-            self.assertEqual(self.request("GET", "/api/missing")[0], 404)
+    def test_health_and_routes_work_without_shared_access_key_and_do_not_cache(self):
+        status, headers, response = self.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(response["remoteEnabled"])
+        self.assertEqual(headers["Cache-Control"], "no-store, private")
+        self.assertEqual(self.request("GET", "/api?route=health")[0], 200)
+        self.assertEqual(self.request("GET", "/api/search")[0], 405)
+        self.assertEqual(self.request("GET", "/api/missing")[0], 404)
 
-    def test_remote_search_requires_server_configuration_and_bearer_even_on_localhost(self):
-        payload = search_request().to_dict()
-        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": ""}):
-            self.assertEqual(self.request("POST", "/api/search", payload)[0], 503)
-        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": TOKEN}), patch("api.index.execute_search") as execute:
-            self.assertEqual(self.request("POST", "/api/search", payload, token="wrong")[0], 401)
-            execute.assert_not_called()
-
-    def test_authorized_request_has_no_sensitive_http_logs(self):
+    def test_remote_search_uses_server_provider_key_without_visitor_token(self):
         request = search_request()
-        logs = io.StringIO()
-        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": TOKEN}), patch(
+        payload = public_search_payload()
+        with patch.dict(os.environ, {"SNUSBASE_API_KEY": KEY}), patch(
             "api.index.execute_search", return_value=result(request, [], 0)
-        ), redirect_stderr(logs):
-            status, _, response = self.request("POST", "/api/search", request.to_dict())
+        ) as execute:
+            status, _, response = self.request("POST", "/api/search", payload)
         self.assertEqual(status, 200)
         self.assertEqual(response["status"], "not_found")
-        self.assertEqual(logs.getvalue(), "")
+        self.assertEqual(execute.call_args.args[0].credentials["apiKey"], KEY)
+
+    def test_remote_search_without_provider_key_returns_clear_error_and_never_starts_worker(self):
+        with patch.dict(os.environ, {"SNUSBASE_API_KEY": ""}), patch("api.index.execute_search") as execute:
+            status, _, response = self.request("POST", "/api/search", public_search_payload())
+        self.assertEqual(status, 400)
+        self.assertEqual(response["error"]["code"], "provider_not_configured")
+        execute.assert_not_called()
+
+    def test_provider_errors_are_logged_without_query_or_credentials(self):
+        secret_target = "private-target@example.test"
+        request = search_request(target=secret_target)
+        logs = io.StringIO()
+        with patch.dict(os.environ, {"SNUSBASE_API_KEY": KEY}), patch(
+            "api.index.execute_search", return_value=result(request, [], 0)
+        ), redirect_stderr(logs):
+            status, _, response = self.request("POST", "/api/search", public_search_payload(target=secret_target))
+            self.assertEqual(status, 200)
+            error_response = result(request, [], 0, "provider_error")
+            with patch("api.index.execute_search", return_value=error_response):
+                status, _, response = self.request("POST", "/api/search", public_search_payload(target=secret_target))
+        self.assertEqual(status, 200)
+        self.assertEqual(response["status"], "error")
+        self.assertIn('"event":"api_error"', logs.getvalue())
+        self.assertIn('"provider":"snusbase"', logs.getvalue())
+        self.assertNotIn(secret_target, logs.getvalue())
+        self.assertNotIn(KEY, logs.getvalue())
+
+    def test_browser_exceptions_are_logged_without_client_details(self):
+        logs = io.StringIO()
+        with redirect_stderr(logs):
+            status, _, response = self.request("POST", "/api/client-error", {
+                "type": "unhandled_rejection", "route": "app",
+            })
+        self.assertEqual(status, 202)
+        self.assertEqual(response, {"accepted": True})
+        self.assertIn('"event":"client_error"', logs.getvalue())
+        self.assertIn('"type":"unhandled_rejection"', logs.getvalue())
+        self.assertNotIn("target", logs.getvalue())
+        self.assertNotIn("stack", logs.getvalue())
+
+    def test_browser_error_endpoint_rejects_unbounded_client_fields(self):
+        with patch("api.index.LOGGER.error") as log_error:
+            status, _, response = self.request("POST", "/api/client-error", {
+                "type": "uncaught_exception", "route": "app", "message": "private@example.test",
+            })
+        self.assertEqual(status, 400)
+        self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertEqual(log_error.call_count, 1)
+        self.assertNotIn("private@example.test", log_error.call_args.args[0])
 
     def test_invalid_input_and_oversized_payload_never_launch_worker(self):
-        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": TOKEN}), patch("api.index.execute_search") as execute:
+        with patch.dict(os.environ, {"SNUSBASE_API_KEY": KEY}), patch("api.index.execute_search") as execute:
             for body, expected in (("not-json", 400), ("{}", 400), ("x" * 20_000, 413)):
                 self.assertEqual(self.request("POST", "/api/search", body=body)[0], expected)
             execute.assert_not_called()
 
 
 class WsgiTests(unittest.TestCase):
-    def request(self, method, path, payload=None, token=TOKEN):
+    def request(self, method, path, payload=None):
         body = json.dumps(payload).encode("utf-8") if payload is not None else b""
         environ = {
             "REQUEST_METHOD": method,
@@ -477,7 +531,6 @@ class WsgiTests(unittest.TestCase):
             "QUERY_STRING": "",
             "CONTENT_TYPE": "application/json" if payload is not None else "",
             "CONTENT_LENGTH": str(len(body)) if payload is not None else "",
-            "HTTP_AUTHORIZATION": f"Bearer {token}",
             "wsgi.input": io.BytesIO(body),
         }
         captured = {}
@@ -490,18 +543,18 @@ class WsgiTests(unittest.TestCase):
         return int(captured["status"].split(" ", 1)[0]), captured["headers"], json.loads(response)
 
     def test_wsgi_health_returns_uncached_json_without_access_key(self):
-        status, headers, payload = self.request("GET", "/api/health", token="")
+        status, headers, payload = self.request("GET", "/api/health")
         self.assertEqual(status, 200)
-        self.assertFalse(payload["remoteEnabled"])
+        self.assertTrue(payload["remoteEnabled"])
         self.assertEqual(headers["Cache-Control"], "no-store, private")
 
-    def test_wsgi_search_uses_the_existing_authorization_boundary(self):
+    def test_wsgi_search_uses_server_key_and_no_visitor_token(self):
         request = search_request()
         payload = result(request, [], 0)
-        with patch.dict(os.environ, {"H8MAIL_ACCESS_TOKEN": TOKEN}), patch(
+        with patch.dict(os.environ, {"SNUSBASE_API_KEY": KEY}), patch(
             "api.index.execute_search", return_value=payload
         ) as execute:
-            status, _, response = self.request("POST", "/api/search", request.to_dict())
+            status, _, response = self.request("POST", "/api/search", public_search_payload())
         self.assertEqual(status, 200)
         self.assertEqual(response, payload)
         execute.assert_called_once()

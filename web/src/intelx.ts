@@ -15,7 +15,7 @@ interface FileRecord { systemId: string; bucket: string; name: string }
 function object(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }
 
 /** Complete IntelX's asynchronous search protocol without repeating start operations. */
-export async function lookupIntelX(target: string, query: string, credentials: Record<string, string>, accessKey: string, outerSignal: AbortSignal, maxFiles = 10): Promise<IntelXResult> {
+export async function lookupIntelX(target: string, query: string, outerSignal: AbortSignal, maxFiles = 10): Promise<IntelXResult> {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     outerSignal.addEventListener('abort', abort, { once: true });
@@ -28,7 +28,7 @@ export async function lookupIntelX(target: string, query: string, credentials: R
     let truncated = false;
     let complete = false;
     const request = async (operation: string, payload: Record<string, unknown>, signal = controller.signal): Promise<Record<string, unknown>> => {
-        const response = await fetch('/api/intelx', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessKey}` }, body: JSON.stringify({ operation, credentials, ...payload }), signal, cache: 'no-store', credentials: 'omit' });
+        const response = await fetch('/api/intelx', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation, ...payload }), signal, cache: 'no-store', credentials: 'omit' });
         const result: unknown = await response.json();
         if (!response.ok || !object(result)) throw new Error(object(result) && object(result.error) && typeof result.error.message === 'string' ? result.error.message : `IntelX ${operation} failed (HTTP ${response.status}).`);
         return result;

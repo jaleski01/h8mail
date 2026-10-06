@@ -20,7 +20,7 @@ test('IntelX starts once, reads returned files, then terminates the search', asy
         if (payload.operation === 'read') assert.equal(payload.hidePasswords, true);
         return new Response(JSON.stringify(bodies[String(payload.operation)]), { status: 200 });
     };
-    const result = await lookupIntelX('person@example.org', 'email', { apiKey: 'fixture-key', apiTier: 'paid' }, 'fixture-access-key', new AbortController().signal);
+    const result = await lookupIntelX('person@example.org', 'email', new AbortController().signal);
     assert.equal(result.status, 'found');
     assert.equal(result.records.length, 1);
     assert.deepEqual(operations, ['start', 'results', 'read', 'terminate']);
@@ -33,7 +33,7 @@ test('IntelX only reports no matches after an explicitly completed search', asyn
         const payload = JSON.parse(String(options?.body)) as Record<string, unknown>;
         return new Response(JSON.stringify(payload.operation === 'start' ? { searchId: 'search-2' } : payload.operation === 'results' ? { status: 'complete', records: [] } : { status: 'terminated' }), { status: 200 });
     };
-    const result = await lookupIntelX('person@example.org', 'email', { apiKey: 'fixture-key' }, 'fixture-access-key', new AbortController().signal);
+    const result = await lookupIntelX('person@example.org', 'email', new AbortController().signal);
     assert.equal(result.status, 'not_found');
     assert.equal(result.truncated, false);
 });
@@ -46,7 +46,7 @@ test('IntelX expired searches remain errors and cleanup failures are visible', a
         if (payload.operation === 'terminate') return new Response(JSON.stringify({ error: { message: 'Termination failed.' } }), { status: 502 });
         return new Response(JSON.stringify(payload.operation === 'start' ? { searchId: 'search-3' } : { status: 'expired', records: [] }), { status: 200 });
     };
-    const result = await lookupIntelX('person@example.org', 'email', { apiKey: 'fixture-key' }, 'fixture-access-key', new AbortController().signal);
+    const result = await lookupIntelX('person@example.org', 'email', new AbortController().signal);
     assert.equal(result.status, 'error');
     assert.ok(result.error?.message.includes('expired'));
     assert.ok(result.warnings.some((warning) => warning.message.includes('termination')));
@@ -65,6 +65,6 @@ test('IntelX cancellation terminates an identified search with a fresh request s
         assert.equal(options?.signal?.aborted, false);
         return new Response(JSON.stringify({ status: 'terminated' }), { status: 200 });
     };
-    await assert.rejects(lookupIntelX('person@example.org', 'email', { apiKey: 'fixture-key' }, 'fixture-access-key', controller.signal), { name: 'AbortError' });
+    await assert.rejects(lookupIntelX('person@example.org', 'email', controller.signal), { name: 'AbortError' });
     assert.equal(terminated, true);
 });

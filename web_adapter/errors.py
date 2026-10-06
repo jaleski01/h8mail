@@ -3,8 +3,7 @@
 MESSAGES = {
     "invalid_request": "The search request is invalid.",
     "invalid_credentials": "Check your provider API key and subscription.",
-    "access_required": "A valid workspace access token is required.",
-    "not_configured": "Set H8MAIL_ACCESS_TOKEN to at least 16 characters to enable remote searches.",
+    "provider_not_configured": "This provider has no server-side API key configured. Open Provider setup at the bottom of the page.",
     "provider_unavailable": "This provider is not available in the web runtime.",
     "rate_limited": "The provider rate limit was reached. Try again later.",
     "provider_denied": "The provider denied access. Check your subscription or remaining credits.",
@@ -20,6 +19,7 @@ MESSAGES = {
     "record_unavailable": "The selected Intelligence X record is unavailable or no longer accessible.",
     "not_found": "The API route was not found.",
     "method_not_allowed": "This HTTP method is not supported for this route.",
+    "internal_error": "The server could not complete this request. Check the Vercel runtime logs.",
 }
 
 

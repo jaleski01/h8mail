@@ -6,9 +6,9 @@ and an optional local companion for workflows that require the original CLI
 engine and access to your computer's files. No analytics, remote fonts or
 tracking SDKs are added.
 
-The repository is prepared for hosting but has not been published, connected to
-GitHub/Vercel or deployed automatically. Keeping it on disk does not enable
-remote deployment or scheduled upstream updates.
+The repository includes the web interface, Python API, Vercel service routing,
+and an upstream synchronization workflow. A local checkout alone does not
+confirm that a Vercel deployment or scheduled upstream workflow is active.
 
 ## Run locally
 
@@ -32,11 +32,10 @@ npm --prefix web run dev:api
 npm --prefix web run dev
 ```
 
-The Vite development server proxies `/api` to the local Python API. For its remote
-provider functions, configure `H8MAIL_ACCESS_TOKEN` in the Python server's process
-environment, then enter the same token in the interface. Browser-local file
-search does not require that token. Never put the access token in a `VITE_`
-variable because those variables are included in the public browser bundle.
+The Vite development server proxies `/api` to the local Python API. Set any
+provider API keys you want to test in the Python server's process environment.
+Remote lookup reads them on the server; the browser does not accept or store
+provider credentials. Browser-local file search does not need provider keys.
 
 The original terminal entry point remains available:
 
@@ -49,27 +48,34 @@ python -m h8mail --help
 Import this repository with its root as the Vercel project root. `vercel.json`
 defines two services: the Vite app builds from `web/` and serves `/`; the Python
 API runs from the repository root and receives `/api` and `/api/*`. The API path
-must remain public because the browser calls it on the same origin; lookup and
-extraction requests still require `H8MAIL_ACCESS_TOKEN`. Vercel Services are
-currently in beta.
+must remain public because the browser calls it on the same origin. Provider API
+keys belong in Vercel Project Settings → Environment Variables and are read only
+by server functions. Do not add them as `VITE_` variables. The interface's
+collapsed **Provider access and Vercel key setup** section lists the server
+variable names and reports whether each API key is configured; it never exposes
+the values.
 
-For a local Vercel router test, run `npx vercel dev -L` from the repository
-root. The `-L` mode does not link a Vercel account or download project
-environment variables.
-
-Only one application environment variable is required:
+Every listed provider key is optional at deployment level. A single search calls
+all hosted providers compatible with that query. Providers without a configured
+key return a visible `provider_not_configured` result, while configured
+providers continue. Add only keys for services you have access to. HIBP breach
+and paste searches share one key. IntelX lists public, free-account and paid API
+instances, and requires an API license for third-party integrations. This
+adapter uses the free or paid instance assigned to the account. It defaults to
+paid; set `INTELX_API_TIER=free` only if IntelX assigned your key to that
+instance.
 
 | Variable | Purpose |
 | --- | --- |
-| `H8MAIL_ACCESS_TOKEN` | A unique secret of 16–512 printable non-space ASCII characters. It authorizes remote lookups and URL extraction. Use a long random token, keep it server-side, and enter it in the interface when connecting. |
-
-Provider keys are entered per session in the interface. They are not Vercel
-environment variables and are not saved to browser storage. Public/anonymous
-provider access, where offered, still depends on that provider's policies and
-limits. API subscriptions, credits and valid credentials remain your
-responsibility. Set the access token on every Vercel environment where you intend
-to allow remote API use; otherwise those requests fail closed while local file
-search stays usable.
+| `HIBP_API_KEY` | Have I Been Pwned account breach and paste searches. |
+| `EMAILREP_API_KEY` | EmailRep reputation lookup. |
+| `HUNTER_API_KEY` | Hunter domain email search. |
+| `LEAKLOOKUP_API_KEY` | Leak-Lookup search. |
+| `SNUSBASE_API_KEY` | Snusbase activation code. |
+| `DEHASHED_API_KEY` | DeHashed API v2. |
+| `INTELX_API_KEY` | Intelligence X API key. |
+| `INTELX_API_TIER` | Optional `paid` or `free`; defaults to `paid`. |
+| `BREACHDIRECTORY_API_KEY` | BreachDirectory subscription key from RapidAPI. |
 
 Do not point the adaptation's deployment repository at the original author's
 repository. It must contain both the upstream package and the adapters/interface.
@@ -103,13 +109,15 @@ capabilities.
 | INI keys and `--gen-config` | Enter provider keys in memory | Config-file paths in the local engine; original `--gen-config` through CLI |
 | Debug mode | Safe error codes instead of provider payloads | Original CLI `--debug`; treat its output as sensitive |
 
-Vercel adapters cover HIBP breaches/pastes, EmailRep, Hunter, Leak-Lookup, Snusbase,
-DeHashed and BreachDirectory through its current RapidAPI endpoint. IntelX uses its
-incremental API workflow. Each service requires its own current subscription or
-credential, and its limits and response coverage still apply. Legacy Scylla and
-WeLeakInfo methods remain in the original package, but the hosted interface marks
-them unavailable because their current secure API contracts are not verified.
-Retaining legacy source does not mean those external services currently work.
+Vercel adapters cover HIBP breaches/pastes, EmailRep, Hunter, Leak-Lookup,
+Snusbase, DeHashed and BreachDirectory through its RapidAPI endpoint. IntelX
+uses its incremental API workflow. A query is sent to every compatible hosted
+adapter in the same user action. Each provider controls its own key, subscription,
+quota and response coverage; a successful integration cannot guarantee a
+particular result. Legacy Scylla and WeLeakInfo methods remain in the original
+package, but the hosted interface marks them unavailable because their current
+secure API contracts are not verified. Retaining legacy source does not mean
+those external services currently work.
 
 Remote searches are bounded by target, response-size, record and execution limits.
 Hunter and DeHashed expose one provider page at a time; use **Load next page** to
@@ -142,17 +150,22 @@ request to the URL you explicitly submit; private, loopback and reserved
 destinations are rejected. These are explicit user-requested third-party
 transfers, not background telemetry.
 
-Access tokens and provider credentials are held in memory. Session queries and
-results are not intentionally retained in browser storage, database tables or
-application logs. The local companion exchanges worker results through a
+Provider credentials are held only in server environment variables and the
+server-side worker input pipe. Session queries and results are not intentionally
+retained in browser storage, database tables or application error logs. API
+failures are written as structured Vercel runtime logs with route, provider,
+status and safe error code only; search targets, API keys, provider response
+payloads, JavaScript messages and stack traces are excluded. Uncaught browser
+exceptions are reported with only an event category and coarse page route. This
+minimal error reporting is enabled to meet the deployment's error-log requirement.
+The local companion exchanges worker results through a
 temporary local job directory and removes it after completion; CLI output files
 that you explicitly request follow the original CLI behavior. Hosting providers
 and queried services have their own infrastructure and retention policies. Exported CSV/JSON files can
 contain sensitive records and are saved only when you request a download. CSV
 formula-like cells are neutralized to prevent spreadsheet formula execution.
 
-Use the access token as the server authorization boundary; hiding controls in
-the browser is not authorization. Keep the local companion bound to loopback,
+Keep the local companion bound to loopback,
 and use the original engine only with data and queries you are authorized to
 process. It preserves the upstream behavior and its external-service limitations.
 
@@ -166,7 +179,8 @@ npm --prefix web run build
 ```
 
 The automated provider tests use offline fixtures. They verify contracts,
-validation, isolation, error handling and upstream compatibility without sending
-private targets or using paid credentials. Live paid-provider success, Vercel
-runtime/deployment and GitHub scheduled workflows still require a configured
-account and an actual run; a local build cannot establish those outcomes.
+validation, credential isolation, error handling and upstream compatibility
+without sending private targets or using paid credentials. The live Vercel test
+must use a reserved test address. Only providers with configured keys can make
+live lookups; missing keys are reported explicitly rather than presented as a
+successful empty search.

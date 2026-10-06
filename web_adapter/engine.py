@@ -109,13 +109,10 @@ def invoke(request: SearchRequest, target: WebTarget, transport: Transport) -> N
         target.target = quote(request.target, safe="")
         target.get_emailrepio(api_key)
     elif request.provider == "hunter":
-        if api_key:
-            domain = request.target.rsplit("@", 1)[-1]
-            transport.request("https://api.hunter.io/v2/domain-search", "GET", target.headers,
-                              params={"domain": domain, "api_key": api_key, "limit": 10,
-                                      "offset": (request.page - 1) * 10})
-        else:
-            target.get_hunterio_public()
+        domain = request.target.rsplit("@", 1)[-1]
+        transport.request("https://api.hunter.io/v2/domain-search", "GET", target.headers,
+                          params={"domain": domain, "api_key": api_key, "limit": 10,
+                                  "offset": (request.page - 1) * 10})
     elif request.provider == "leaklookup":
         # Use the public method for email to avoid legacy private-field parsing bugs.
         if request.query == "email":
@@ -212,20 +209,16 @@ def normalize(request: SearchRequest, transport: Transport) -> dict:
     elif request.provider == "hunter":
         require(isinstance(payload, dict) and isinstance(payload.get("data"), dict))
         hunter_data = payload["data"]
-        if request.credentials["apiKey"]:
-            require(isinstance(hunter_data.get("emails"), list)
-                    and isinstance(payload.get("meta"), dict))
-            for email in hunter_data["emails"]:
-                require(isinstance(email, dict) and isinstance(email.get("value"), str))
-                if len(records) < MAX_RECORDS:
-                    records.append(record("HUNTER", "related_email", email["value"], request))
-            count = nonnegative_integer(payload["meta"].get("results"))
-            has_more = bool(hunter_data["emails"]) and request.page * 10 < count
-            truncated = count > 10_000
-            metadata.update({"total": count, "hasMore": has_more, "truncated": truncated})
-        else:
-            count = nonnegative_integer(hunter_data.get("total"))
-            records.append(record("HUNTER", "domain_email_count", count, request))
+        require(isinstance(hunter_data.get("emails"), list)
+                and isinstance(payload.get("meta"), dict))
+        for email in hunter_data["emails"]:
+            require(isinstance(email, dict) and isinstance(email.get("value"), str))
+            if len(records) < MAX_RECORDS:
+                records.append(record("HUNTER", "related_email", email["value"], request))
+        count = nonnegative_integer(payload["meta"].get("results"))
+        has_more = bool(hunter_data["emails"]) and request.page * 10 < count
+        truncated = count > 10_000
+        metadata.update({"total": count, "hasMore": has_more, "truncated": truncated})
     elif request.provider == "leaklookup":
         require(isinstance(payload, dict) and (payload.get("error") is False or payload.get("error") == "false"))
         messages = payload.get("message")

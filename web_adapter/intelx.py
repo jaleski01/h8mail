@@ -36,23 +36,25 @@ def bounded_integer(value: object, minimum: int = 1, maximum: int = 10) -> int:
     return value
 
 
-def validate_operation(payload: object) -> dict:
+def validate_operation(payload: object, server_credentials: dict[str, str] | None = None) -> dict:
     if not isinstance(payload, dict):
         raise AdapterError("invalid_request")
     operation = payload.get("operation")
     if not isinstance(operation, str) or operation not in OPERATIONS or set(payload) - (
-        OPERATIONS[operation] | {"operation", "credentials"}
+        OPERATIONS[operation] | {"operation"}
     ):
         raise AdapterError("invalid_request")
-    credentials = payload.get("credentials")
+    credentials = server_credentials or {}
     if not isinstance(credentials, dict) or set(credentials) - {"apiKey", "apiTier"}:
         raise AdapterError("invalid_request")
     api_key = credentials.get("apiKey")
     api_tier = credentials.get("apiTier") or "paid"
-    if not isinstance(api_key, str) or not 1 <= len(api_key) <= 512 or any(
+    if not isinstance(api_key, str) or len(api_key) > 512 or any(
         not 33 <= ord(character) <= 126 for character in api_key
     ):
         raise AdapterError("invalid_credentials")
+    if not api_key:
+        raise AdapterError("provider_not_configured")
     if not isinstance(api_tier, str) or api_tier not in ROOTS:
         raise AdapterError("invalid_request")
     normalized = {"operation": operation, "credentials": {"apiKey": api_key, "apiTier": api_tier}}
@@ -74,7 +76,7 @@ def validate_operation(payload: object) -> dict:
                 raise AdapterError("invalid_request")
         else:
             checked = validate_request({"provider": "snusbase", "target": target, "query": query,
-                                        "credentials": {"apiKey": api_key}, "hidePasswords": hide_passwords})
+                                        "hidePasswords": hide_passwords}, {"apiKey": api_key})
             target = checked.target
         normalized.update(target=target, query=query, hidePasswords=hide_passwords)
     if operation == "start":

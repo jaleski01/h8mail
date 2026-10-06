@@ -1,29 +1,47 @@
 """WSGI entry point for the private h8mail web adapter."""
 
-from hmac import compare_digest
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 import json
-import os
+import logging
 from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
 from h8mail.utils.version import __version__
 from web_adapter.contracts import MAX_REQUEST_BYTES, validate_request
-from web_adapter.errors import AdapterError, public_error
+from web_adapter.errors import AdapterError, MESSAGES, public_error
 from web_adapter.executor import execute_search
-from web_adapter.providers import PROVIDERS
+from web_adapter.providers import PROVIDERS, PROVIDER_BY_ID, get_provider_credentials
+
+LOGGER = logging.getLogger("h8mail.api")
+API_ROUTES = {"health", "search", "extract", "intelx", "client-error"}
+CLIENT_ERROR_TYPES = {"uncaught_exception", "unhandled_rejection"}
+CLIENT_ERROR_ROUTES = {"app"}
+URL_ERROR_CODES = {
+    "invalid_url", "dns_error", "blocked_address", "redirect_error", "website_error",
+    "unsupported_content", "page_too_large", "too_many_emails", "website_unavailable",
+    "timeout", "extraction_failed",
+}
+ERROR_CODES = set(MESSAGES) | URL_ERROR_CODES
 
 
-def configured_token() -> str | None:
-    token = os.environ.get("H8MAIL_ACCESS_TOKEN", "")
-    return token if 16 <= len(token) <= 512 and all(33 <= ord(char) <= 126 for char in token) else None
+def provider_metadata() -> list[dict]:
+    providers = []
+    for provider in PROVIDERS:
+        entry = {**provider}
+        fields = []
+        for field in provider["credentialFields"]:
+            configured = bool(get_provider_credentials(provider["id"]).get(field["key"]))
+            fields.append({**field, "configured": configured})
+        entry["credentialFields"] = fields
+        providers.append(entry)
+    return providers
 
 
 def health() -> dict:
     return {
         "engine": {"name": "h8mail", "version": __version__}, "version": __version__,
-        "remoteEnabled": configured_token() is not None, "providers": PROVIDERS,
+        "remoteEnabled": True, "providers": provider_metadata(),
         "capabilities": {"maxTargets": 10, "maxConcurrent": 4, "maxRecords": 500,
                          "localSearch": "browser", "urlExtraction": True},
     }
@@ -34,11 +52,32 @@ def route_for(path: str, query_string: str) -> str:
     return route.strip("/") if route else path.removeprefix("/api").strip("/")
 
 
-def dispatch_request(
+def log_api_error(route: str, status: int, payload: dict, exception: Exception | None = None) -> None:
+    error = payload.get("error")
+    errors = [error] if isinstance(error, dict) else []
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list):
+        errors.extend(warning for warning in warnings if isinstance(warning, dict))
+    provider_id = payload.get("provider")
+    event = {
+        "level": "error", "event": "api_error",
+        "route": route if route in API_ROUTES else "unknown",
+        "status": status,
+    }
+    if isinstance(provider_id, str) and provider_id in PROVIDER_BY_ID:
+        event["provider"] = provider_id
+    if exception is not None:
+        event["exception"] = type(exception).__name__[:64]
+    for error in errors:
+        code = error.get("code")
+        event["code"] = code if isinstance(code, str) and code in ERROR_CODES else "provider_error"
+        LOGGER.error(json.dumps(event, separators=(",", ":"), sort_keys=True))
+
+
+def _dispatch_request(
     method: str,
     path: str,
     query_string: str,
-    authorization_values: list[str],
     content_type: str,
     content_length_values: list[str],
     has_transfer_encoding: bool,
@@ -54,17 +93,9 @@ def dispatch_request(
         return 405, {"error": public_error("method_not_allowed")}
     if method != "POST":
         return 405, {"error": public_error("method_not_allowed")}
-    if route not in ("search", "extract", "intelx"):
+    if route not in ("search", "extract", "intelx", "client-error"):
         code = "method_not_allowed" if route in ("", "health") else "not_found"
         return (405 if code == "method_not_allowed" else 404), {"error": public_error(code)}
-
-    token = configured_token()
-    if token is None:
-        return 503, {"error": public_error("not_configured")}
-    authorization = authorization_values[0] if len(authorization_values) == 1 else ""
-    supplied = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
-    if len(supplied) > 512 or not compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
-        return 401, {"error": public_error("access_required")}
 
     try:
         if (content_type.split(";", 1)[0].strip().lower() != "application/json"
@@ -78,12 +109,23 @@ def dispatch_request(
         if route == "extract":
             if not isinstance(payload, dict) or set(payload) != {"url"} or not isinstance(payload["url"], str):
                 raise AdapterError("invalid_request")
+        elif route == "client-error":
+            if (not isinstance(payload, dict) or set(payload) != {"type", "route"}
+                    or not isinstance(payload["type"], str) or payload["type"] not in CLIENT_ERROR_TYPES
+                    or not isinstance(payload["route"], str) or payload["route"] not in CLIENT_ERROR_ROUTES):
+                raise AdapterError("invalid_request")
+            LOGGER.error(json.dumps({
+                "level": "error", "event": "client_error", "code": "client_error",
+                "type": payload["type"], "route": payload["route"],
+            }, separators=(",", ":"), sort_keys=True))
+            return 202, {"accepted": True}
         elif route == "intelx":
             from web_adapter.intelx import validate_operation
 
-            request = validate_operation(payload)
+            request = validate_operation(payload, get_provider_credentials("intelx"))
         else:
-            request = validate_request(payload)
+            provider_id = payload.get("provider") if isinstance(payload, dict) else ""
+            request = validate_request(payload, get_provider_credentials(provider_id))
     except (AdapterError, ValueError, UnicodeError) as error:
         code = error.code if isinstance(error, AdapterError) else "invalid_request"
         return (413 if code == "payload_too_large" else 400), {"error": public_error(code)}
@@ -107,6 +149,30 @@ def dispatch_request(
     return 200, execute_search(request)
 
 
+def dispatch_request(
+    method: str,
+    path: str,
+    query_string: str,
+    content_type: str,
+    content_length_values: list[str],
+    has_transfer_encoding: bool,
+    read_body: Callable[[int], bytes],
+) -> tuple[int, dict]:
+    route = route_for(path, query_string)
+    try:
+        status, payload = _dispatch_request(
+            method, path, query_string, content_type, content_length_values,
+            has_transfer_encoding, read_body,
+        )
+    except Exception as error:
+        status, payload = 500, {"error": public_error("internal_error")}
+        log_api_error(route, status, payload, error)
+        return status, payload
+    if status >= 400 or payload.get("status") == "error" or payload.get("error"):
+        log_api_error(route, status, payload)
+    return status, payload
+
+
 def encode_response(payload: dict) -> tuple[bytes, list[tuple[str, str]]]:
     encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
     return encoded, [
@@ -120,14 +186,12 @@ def encode_response(payload: dict) -> tuple[bytes, list[tuple[str, str]]]:
 
 def app(environ: dict, start_response: Callable) -> list[bytes]:
     """Serve the API through Vercel's Python WSGI entry point."""
-    authorization = environ.get("HTTP_AUTHORIZATION")
     transfer_encoding = environ.get("HTTP_TRANSFER_ENCODING", "")
     length = environ.get("CONTENT_LENGTH", "")
     status, payload = dispatch_request(
         environ.get("REQUEST_METHOD", ""),
         environ.get("PATH_INFO", "/"),
         environ.get("QUERY_STRING", ""),
-        [authorization] if authorization is not None else [],
         environ.get("CONTENT_TYPE", ""),
         [length] if length else [],
         bool(transfer_encoding),
@@ -140,7 +204,7 @@ def app(environ: dict, start_response: Callable) -> list[bytes]:
 
 class handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        # HTTP logs must not contain Authorization headers, query targets, or private records.
+        # HTTP logs must not contain request targets, provider keys, or private records.
         pass
 
     def _route(self) -> str:
@@ -160,13 +224,11 @@ class handler(BaseHTTPRequestHandler):
 
     def _dispatch(self) -> None:
         parsed = urlsplit(self.path)
-        authorization = self.headers.get_all("Authorization", []) or []
         lengths = self.headers.get_all("Content-Length", []) or []
         status, payload = dispatch_request(
             self.command,
             parsed.path,
             parsed.query,
-            authorization,
             self.headers.get("Content-Type", ""),
             lengths,
             bool(self.headers.get("Transfer-Encoding")),

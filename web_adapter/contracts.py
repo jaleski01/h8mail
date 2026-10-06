@@ -39,15 +39,15 @@ def normalize_domain(domain: str) -> str:
     return normalized
 
 
-def validate_request(payload: object) -> SearchRequest:
+def validate_request(payload: object, server_credentials: dict[str, str] | None = None) -> SearchRequest:
     if not isinstance(payload, dict) or set(payload) - {
-        "target", "query", "provider", "credentials", "hidePasswords", "page"
+        "target", "query", "provider", "hidePasswords", "page"
     }:
         raise AdapterError("invalid_request")
     target = payload.get("target")
     query = payload.get("query", "email")
     provider_id = payload.get("provider")
-    credentials = payload.get("credentials", {})
+    credentials = server_credentials or {}
     hide_passwords = payload.get("hidePasswords", True)
     page = payload.get("page", 1)
     if not isinstance(provider_id, str) or provider_id not in PROVIDER_BY_ID:
@@ -87,7 +87,8 @@ def validate_request(payload: object) -> SearchRequest:
             raise AdapterError("invalid_request") from exc
     elif not target or len(target) > 256:
         raise AdapterError("invalid_request")
-    if not isinstance(credentials, dict) or set(credentials) - {"apiKey"}:
+    allowed_credentials = {field["key"] for field in provider["credentialFields"]}
+    if not isinstance(credentials, dict) or set(credentials) - allowed_credentials:
         raise AdapterError("invalid_request")
     api_key = credentials.get("apiKey", "")
     if not isinstance(api_key, str) or len(api_key) > 512 or any(
@@ -98,7 +99,7 @@ def validate_request(payload: object) -> SearchRequest:
     if provider_id == "hunter" and not api_key and page != 1:
         raise AdapterError("invalid_request")
     if provider["credentialFields"][0]["required"] and not api_key:
-        raise AdapterError("invalid_credentials")
+        raise AdapterError("provider_not_configured")
     if provider_id in ("hibp", "hibp_pastes") and not re.fullmatch(r"[a-fA-F0-9]{32}", api_key):
         raise AdapterError("invalid_credentials")
     return SearchRequest(target, query, provider_id, {"apiKey": api_key}, hide_passwords, page)

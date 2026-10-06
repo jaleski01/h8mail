@@ -5,9 +5,11 @@ companion and safety boundaries live outside that directory. `UPSTREAM.lock.json
 records the exact imported commit and the files owned by upstream. The original
 BSD copyright notice and license are retained in `LICENSE`.
 
-The prepared workflows do not run from a local folder. Nothing has been published
-or connected to an account automatically. They become available only after you
-choose to publish this adapted repository to GitHub and enable its Actions.
+The adapted repository is published as `jaleski01/H8MAIL` and the Vercel
+production project is `h8mail`. GitHub Actions and Vercel run outside this local
+checkout: the workflow files describe the scheduled updater and Vercel's Git
+integration, but each successful run and production deployment must still be
+verified in the respective service.
 
 ## Automatic promotion
 
