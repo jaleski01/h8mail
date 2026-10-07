@@ -185,6 +185,16 @@ h3 { font-size: 15px; font-weight: 400; line-height: 1.4; letter-spacing: -.01em
 .results-table td:last-child { font-family: var(--mono-font); color: var(--text); }
 .results-table td.masked { color: var(--subtle); font-style: italic; }
 .run-warning { border-top: 1px solid var(--border); padding: 16px 20px; font-size: 11px; color: var(--accent); }
+.provider-coverage { margin-bottom: var(--space-md); }
+.coverage-summary { color: var(--muted); font-size: 12px; margin: var(--space-sm) 0; max-width: 800px; }
+.coverage-list { list-style: none; padding: 0; margin: 0; border-bottom: 1px solid var(--border); }
+.coverage-entry { display: grid; grid-template-columns: 160px 115px minmax(0, 1fr); gap: var(--space-sm); padding: var(--space-sm) 0; border-top: 1px solid var(--border); align-items: baseline; }
+.coverage-provider { font-size: 12px; overflow-wrap: anywhere; }
+.coverage-status { font-family: var(--mono-font); font-size: 9px; color: var(--text); }
+.coverage-status.success { color: var(--success); }
+.coverage-status.warning { color: var(--accent); }
+.coverage-status.inactive, .coverage-entry p { color: var(--muted); }
+.coverage-entry p { font-size: 11px; overflow-wrap: anywhere; }
 .extraction-output { border-top: 1px solid var(--border); padding: 25px 36px 30px; }
 .extraction-output pre { padding: 18px 20px; margin: 0; border: 1px solid var(--border); color: var(--muted); line-height: 1.9; font-family: var(--mono-font); font-size: 12px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .extraction-output .button { font-size: 11px; }
@@ -263,6 +273,8 @@ h3 { font-size: 15px; font-weight: 400; line-height: 1.4; letter-spacing: -.01em
     .footer-brand { display: block; margin-bottom: 8px; }
 }
 @media (max-width: 640px) {
+    .coverage-entry { grid-template-columns: minmax(0, 1fr) auto; gap: 6px var(--space-sm); }
+    .coverage-entry p { grid-column: 1 / -1; }
     .shell { padding: 0 18px; }
     .masthead { height: 76px; }
     .header-meta .mono { display: none; }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { makeProviderSearchPlan } from '../src/provider-search';
+import { makeProviderSearchPlan, providerSearchAvailability } from '../src/provider-search';
 
 const providers = [
     { id: 'hibp', name: 'Have I Been Pwned', available: true, queryTypes: ['email'], credentialFields: [{ key: 'apiKey', required: true, configured: true }] },
@@ -36,5 +36,45 @@ describe('aggregate provider search plan', () => {
             ? { ...provider, credentialFields: [{ key: 'apiKey', required: true, configured: true }] }
             : provider);
         assert.deepEqual(makeProviderSearchPlan(['example.test'], configured, 'domain').map(({ provider }) => provider.id), ['hunter']);
+    });
+
+    it('includes every compatible provider when all required keys are configured', () => {
+        const configured = providers.map((provider) => ({
+            ...provider,
+            credentialFields: provider.credentialFields?.map((field) => ({ ...field, configured: true })),
+        }));
+        assert.deepEqual(makeProviderSearchPlan(['one@example.test'], configured, 'email').map(({ provider }) => provider.id), ['hibp', 'intelx', 'snusbase', 'hunter']);
+    });
+
+    it('keeps free email lookup active when all provider keys are absent', () => {
+        const unconfigured = providers.map((provider) => ({
+            ...provider,
+            credentialFields: provider.credentialFields?.map((field) => ({ ...field, configured: false })),
+        }));
+        assert.deepEqual(makeProviderSearchPlan(['one@example.test'], unconfigured, 'email').map(({ provider }) => provider.id), ['hunter']);
+        assert.equal(providerSearchAvailability(unconfigured[4]!, 'email').status, 'unsupported_query');
+    });
+
+    it('explains why each excluded provider was not queried', () => {
+        assert.equal(providerSearchAvailability(providers[2]!, 'email').status, 'missing_key');
+        assert.equal(providerSearchAvailability(providers[4]!, 'email').status, 'unsupported_query');
+        assert.equal(providerSearchAvailability(providers[5]!, 'email').status, 'unavailable');
+        const access = providerSearchAvailability({
+            id: 'emailrep', name: 'EmailRep', available: true, queryTypes: ['email'],
+            credentialFields: [{ key: 'apiKey', required: true, configured: false, environmentVariable: 'EMAILREP_API_KEY' }],
+            accessDescription: 'Anonymous access is disabled.',
+        }, 'email');
+        assert.equal(access.status, 'missing_key');
+        assert.match(access.message, /EMAILREP_API_KEY/);
+        assert.match(access.message, /Anonymous access is disabled/);
+    });
+
+    it('requires all mandatory credentials while preserving an explicit free mode', () => {
+        const multiCredentialProvider = {
+            id: 'multi', name: 'Multi', available: true, queryTypes: ['email', 'domain'], freeQueryTypes: ['email'],
+            credentialFields: [{ key: 'apiKey', required: true, configured: true }, { key: 'account', required: true, configured: false }],
+        };
+        assert.equal(providerSearchAvailability(multiCredentialProvider, 'domain').status, 'missing_key');
+        assert.equal(providerSearchAvailability(multiCredentialProvider, 'email').status, 'ready');
     });
 });

@@ -2,7 +2,7 @@ import './styles.css';
 import { mountEngine } from './engine';
 import { lookupIntelX } from './intelx';
 import { appendChaseTargets, extractEmails, isEmailAddress, MAX_TARGETS, parseEmailTargets, toCsv, visibleValue, type ExportRecord, type RecordEntry } from './domain';
-import { canRunProviderSearch, makeProviderSearchPlan, type ProviderSearchJob, type SearchProvider } from './provider-search';
+import { canRunProviderSearch, makeProviderSearchPlan, providerSearchAvailability, type ProviderSearchJob, type SearchProvider } from './provider-search';
 
 type ClientErrorEvent =
     | { type: 'uncaught_exception' | 'unhandled_rejection'; route: 'app' | 'local' }
@@ -48,6 +48,7 @@ let localAccessToken = '';
 let selectedFiles: File[] = [];
 let extracted: string[] = [];
 let results: SearchResult[] = [];
+let onlineRun: { query: QueryType; providers: readonly Provider[]; targets: readonly string[] } | null = null;
 let runWarnings: string[] = [];
 let running = false;
 let engineBusy = false;
@@ -96,13 +97,13 @@ function hasConfiguredApiKey(provider: Provider): boolean {
 function renderProviderSummary(): void {
     const compatible = providersForQuery();
     const runnable = compatible.filter((provider) => canRunProviderSearch(provider, querySelect.value));
-    const free = runnable.filter((provider) => !hasConfiguredApiKey(provider));
+    const free = runnable.filter((provider) => provider.freeQueryTypes?.includes(querySelect.value) || !provider.credentialFields.some((field) => field.required));
     const missingKeys = compatible.length - runnable.length;
     const names = runnable.map((provider) => provider.name).join(', ');
     const emailFreeMode = querySelect.value === 'email' && runnable.some((provider) => provider.id === 'hunter');
     element('provider-description').textContent = compatible.length
         ? emailFreeMode
-            ? 'Every email lookup includes free Hunter Email Insight signals. A Hunter key adds business-domain contact discovery. These Hunter results do not search breach records; configured breach providers run alongside them.'
+            ? 'All accessible email sources run automatically. Hunter Email Insight is the only current no-key email source in this catalog. It returns address/domain signals, not breach records. Other email APIs require their own keys.'
             : runnable.length
                 ? `${runnable.length} source${runnable.length === 1 ? '' : 's'} can run for ${queryLabels[querySelect.value as QueryType] ?? 'this query'}; key-required sources are skipped automatically.`
                 : 'No key-free source is available for this query. Local file and text tools still work without deployment keys.'
@@ -299,6 +300,8 @@ function beginRun(): number {
     cancelRun(false);
     running = true;
     results = [];
+    onlineRun = null;
+    renderProviderCoverage();
     runWarnings = [];
     showSensitive.checked = false;
     controller = new AbortController();
@@ -378,6 +381,8 @@ async function runOnline(event: SubmitEvent): Promise<void> {
     const chaseLimit = Math.min(25, Math.max(targets.length, Number(element<HTMLInputElement>('chase-limit').value) || 10));
     const seen = new Set(targets);
     const id = beginRun();
+    onlineRun = { query, providers: health.providers, targets };
+    renderProviderCoverage();
     const signal = controller?.signal;
     setMessage('online-message', `Searching ${targets.length} target${targets.length === 1 ? '' : 's'} with ${runnable.length} available source${runnable.length === 1 ? '' : 's'}…`);
     let nextIndex = 0;
@@ -426,6 +431,7 @@ async function runOnline(event: SubmitEvent): Promise<void> {
             }
             completed += 1;
             results = ordered.filter((entry): entry is SearchResult => Boolean(entry));
+            renderProviderCoverage();
             const progress = document.getElementById('run-progress-text');
             if (progress) progress.textContent = `${completed} / ${queue.length} provider lookups completed${chaseEnabled ? ' · bounded chase enabled' : ''}.`;
             element('results-announcement').textContent = `${completed} of ${queue.length} provider lookups completed.`;
@@ -555,7 +561,61 @@ async function loadNextPage(index: number, expected: SearchResult, button: HTMLB
     }
 }
 
+function renderProviderCoverage(): void {
+    const coverage = element('provider-coverage');
+    coverage.replaceChildren();
+    coverage.hidden = !onlineRun;
+    if (!onlineRun) return;
+    const { query, providers, targets } = onlineRun;
+    const heading = document.createElement('h3');
+    heading.id = 'coverage-title';
+    heading.className = 'eyebrow';
+    heading.textContent = 'SEARCH COVERAGE · ALL PROVIDERS';
+    const summary = document.createElement('p');
+    summary.className = 'coverage-summary';
+    const accessible = providers.filter((provider) => canRunProviderSearch(provider, query));
+    summary.textContent = `${accessible.length} of ${providers.length} providers accessible for this ${queryLabels[query].toLowerCase()} search. Every accessible source is included automatically. Sources that require a key, are unavailable, or support another query are listed below; they have not been searched.`;
+    const list = document.createElement('ul');
+    list.className = 'coverage-list';
+    for (const provider of providers) {
+        const access = providerSearchAvailability(provider, query);
+        const lookups = results.filter((result) => result.provider === provider.name);
+        const failures = lookups.filter((result) => result.status === 'error').length;
+        const rows = lookups.reduce((total, result) => total + result.records.length, 0);
+        const partial = lookups.some((result) => result.truncated || result.hasMore || result.warnings?.length);
+        const incomplete = lookups.length < targets.length;
+        const status = access.status === 'ready'
+            ? incomplete ? (running ? 'IN PROGRESS' : 'NOT COMPLETED')
+                : failures ? (failures === lookups.length ? 'FAILED' : 'PARTIAL')
+                    : partial ? 'PARTIAL' : rows ? 'RESULTS' : 'NO MATCHES'
+            : access.status === 'missing_key' ? 'KEY REQUIRED'
+                : access.status === 'unsupported_query' ? 'OTHER QUERY TYPE' : 'UNAVAILABLE';
+        const entry = document.createElement('li');
+        entry.className = 'coverage-entry';
+        const name = document.createElement(provider.apiDocumentationUrl ? 'a' : 'span');
+        name.className = 'coverage-provider';
+        name.textContent = provider.name;
+        if (name instanceof HTMLAnchorElement && provider.apiDocumentationUrl) {
+            name.href = provider.apiDocumentationUrl;
+            name.target = '_blank';
+            name.rel = 'noopener noreferrer';
+            name.setAttribute('aria-label', `${provider.name} API documentation, opens in a new tab`);
+        }
+        const label = document.createElement('span');
+        label.className = `coverage-status ${access.status === 'ready' ? failures || partial ? 'warning' : rows ? 'success' : '' : 'inactive'}`;
+        label.textContent = status;
+        const message = document.createElement('p');
+        message.textContent = access.status === 'ready'
+            ? `${lookups.length} / ${targets.length} lookups completed · ${rows} returned rows${failures ? ` · ${failures} failed` : ''}. ${lookups.length ? 'Results and any errors are shown below.' : access.message}`
+            : access.message;
+        entry.append(name, label, message);
+        list.append(entry);
+    }
+    coverage.append(heading, summary, list);
+}
+
 function renderResults(): void {
+    renderProviderCoverage();
     resultContent.replaceChildren();
     const recordCount = results.reduce((total, result) => total + result.records.length, 0);
     const targetCount = new Set(results.map((result) => result.target)).size;
@@ -569,7 +629,7 @@ function renderResults(): void {
         const empty = document.createElement('div');
         empty.className = 'empty-state';
         const message = document.createElement('p');
-        message.textContent = runWarnings.length ? 'No complete target results are available.' : 'Choose a provider or search a local file to begin.';
+        message.textContent = runWarnings.length ? 'No complete target results are available.' : 'Run an aggregated lookup or search a local file to begin.';
         empty.append(message);
         resultContent.append(empty);
     }
@@ -726,6 +786,7 @@ element('online-clear').addEventListener('click', () => {
     extracted = [];
     selectedFiles = [];
     results = [];
+    onlineRun = null;
     runWarnings = [];
     showSensitive.checked = false;
     element('extraction-output').hidden = true;

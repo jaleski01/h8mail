@@ -133,6 +133,15 @@ marks them unavailable because their current secure API contracts are not
 verified. Retaining legacy source does not mean those external services
 currently work.
 
+Every aggregated lookup displays a **Search coverage** list beside its results.
+All catalog providers appear with their actual access or completion status:
+results, no matches, partial/failed lookup, missing key, unsupported query, or
+unavailable hosted API. Skipped providers are never counted as completed
+lookups or marked as no matches. A cancelled lookup retains completed results
+and marks remaining work as not completed. Hunter Email Insight is currently
+the only no-key email lookup in this catalog; free HIBP Pwned Passwords accepts
+a password candidate, not an email. EmailRep's anonymous API is disabled.
+
 Remote searches are bounded by target, response-size, record and execution limits.
 Hunter and DeHashed expose one provider page at a time; use **Load next page** to
 continue within the limits of the active subscription. DeHashed is capped at
