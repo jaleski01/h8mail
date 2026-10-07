@@ -99,10 +99,10 @@ function renderProviderSummary(): void {
     const free = runnable.filter((provider) => !hasConfiguredApiKey(provider));
     const missingKeys = compatible.length - runnable.length;
     const names = runnable.map((provider) => provider.name).join(', ');
-    const emailFreeMode = querySelect.value === 'email' && free.some((provider) => provider.id === 'hunter');
+    const emailFreeMode = querySelect.value === 'email' && runnable.some((provider) => provider.id === 'hunter');
     element('provider-description').textContent = compatible.length
         ? emailFreeMode
-            ? 'Without Vercel keys, email lookup uses Hunter Email Insight for deliverability signals. It does not search breach records.'
+            ? 'Every email lookup includes free Hunter Email Insight signals. A Hunter key adds business-domain contact discovery. These Hunter results do not search breach records; configured breach providers run alongside them.'
             : runnable.length
                 ? `${runnable.length} source${runnable.length === 1 ? '' : 's'} can run for ${queryLabels[querySelect.value as QueryType] ?? 'this query'}; key-required sources are skipped automatically.`
                 : 'No key-free source is available for this query. Local file and text tools still work without deployment keys.'
@@ -630,7 +630,7 @@ function renderResults(): void {
         } else {
             const message = document.createElement('p');
             message.className = result.status === 'error' ? 'result-error' : 'result-empty';
-            message.textContent = result.error?.message ?? 'The selected source reported no matches. This does not guarantee that the target has never appeared in a breach.';
+            message.textContent = result.error?.message ?? (result.notice ? 'No records were returned by this source.' : 'The selected source reported no matches. This does not guarantee that the target has never appeared in a breach.');
             group.append(message);
         }
         resultContent.append(group);
@@ -640,7 +640,8 @@ function renderResults(): void {
             const nextPage = document.createElement('button');
             nextPage.type = 'button';
             nextPage.className = 'button secondary pagination-button';
-            nextPage.textContent = `Load next page${result.total ? ` · ${Math.max(0, result.total - result.records.length)} remaining` : ''}`;
+            const returnedMatches = result.provider === 'Hunter' ? result.records.filter((record) => record.field === 'related_email').length : result.records.length;
+            nextPage.textContent = `Load next page${result.total ? ` · ${Math.max(0, result.total - returnedMatches)} remaining` : ''}`;
             nextPage.setAttribute('aria-label', `Load the next page of ${result.provider} results for ${result.query === 'password' ? 'password query' : result.target}`);
             nextPage.addEventListener('click', () => { void loadNextPage(results.indexOf(result), result, nextPage); });
             pagination.append(nextPage);

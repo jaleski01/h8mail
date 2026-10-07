@@ -184,7 +184,7 @@ def dispatch_request(
         status, payload = 500, {"error": public_error("internal_error")}
         log_api_error(route, status, payload, error)
         return status, payload
-    if status >= 400 or payload.get("status") == "error" or payload.get("error"):
+    if status >= 400 or payload.get("status") == "error" or payload.get("error") or payload.get("warnings"):
         log_api_error(route, status, payload)
     return status, payload
 

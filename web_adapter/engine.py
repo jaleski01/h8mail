@@ -123,15 +123,6 @@ def invoke(request: SearchRequest, target: WebTarget, transport: Transport) -> N
     elif request.provider == "emailrep":
         target.target = quote(request.target, safe="")
         target.get_emailrepio(api_key)
-    elif request.provider == "hunter":
-        if api_key:
-            domain = request.target.rsplit("@", 1)[-1]
-            transport.request("https://api.hunter.io/v2/domain-search", "GET", target.headers,
-                              params={"domain": domain, "api_key": api_key, "limit": 10,
-                                      "offset": (request.page - 1) * 10})
-        else:
-            transport.request("https://api.hunter.io/v2/email-insight", "GET", target.headers,
-                              params={"email": request.target})
     elif request.provider == "leaklookup":
         # Use the public method for email to avoid legacy private-field parsing bugs.
         if request.query == "email":
@@ -225,33 +216,6 @@ def normalize(request: SearchRequest, transport: Transport) -> dict:
         records.append(record("EMAILREP", "references", references, request))
         # References include non-breach evidence; never label this number as a breach count.
         count = 1
-    elif request.provider == "hunter":
-        require(isinstance(payload, dict) and isinstance(payload.get("data"), dict))
-        hunter_data = payload["data"]
-        if request.credentials["apiKey"]:
-            require(isinstance(hunter_data.get("emails"), list)
-                    and isinstance(payload.get("meta"), dict))
-            for email in hunter_data["emails"]:
-                require(isinstance(email, dict) and isinstance(email.get("value"), str))
-                if len(records) < MAX_RECORDS:
-                    records.append(record("HUNTER", "related_email", email["value"], request))
-            count = nonnegative_integer(payload["meta"].get("results"))
-            has_more = bool(hunter_data["emails"]) and request.page * 10 < count
-            truncated = count > 10_000
-            metadata.update({"total": count, "hasMore": has_more, "truncated": truncated})
-        else:
-            returned_email = hunter_data.get("email")
-            require(isinstance(returned_email, str)
-                    and returned_email.casefold() == request.target.casefold())
-            for field in ("gibberish", "pattern", "mx_records", "disposable", "webmail"):
-                require(type(hunter_data.get(field)) is bool)
-                records.append(record("HUNTER", field, hunter_data[field], request))
-            webmail_allowed = hunter_data.get("webmail_allowed")
-            require(webmail_allowed is None or type(webmail_allowed) is bool)
-            if webmail_allowed is not None:
-                records.append(record("HUNTER", "webmail_allowed", webmail_allowed, request))
-            count = 1
-            metadata["notice"] = "Free Email Insight signals only; this result does not search breach records."
     elif request.provider == "pwnedpasswords":
         require(isinstance(payload, bytes))
         digest = hibp_password_hash(request.target)
@@ -355,12 +319,90 @@ def normalize(request: SearchRequest, transport: Transport) -> dict:
     return result(request, records, count, **metadata)
 
 
+def hunter_insight(payload: object, request: SearchRequest) -> tuple[list[dict[str, str]], bool]:
+    """Validate the free endpoint before using its webmail flag to skip domain search."""
+    require(isinstance(payload, dict) and isinstance(payload.get("data"), dict))
+    insight = payload["data"]
+    returned_email = insight.get("email")
+    require(isinstance(returned_email, str)
+            and returned_email.casefold() == request.target.casefold())
+    fields = ("gibberish", "pattern", "mx_records", "disposable", "webmail")
+    require(all(type(insight.get(field)) is bool for field in fields))
+    webmail_allowed = insight.get("webmail_allowed")
+    require(webmail_allowed is None or type(webmail_allowed) is bool)
+    records = [record("HUNTER_EMAIL_INSIGHT", field, insight[field], request) for field in fields]
+    if webmail_allowed is not None:
+        records.append(record("HUNTER_EMAIL_INSIGHT", "webmail_allowed", webmail_allowed, request))
+    return records, insight["webmail"]
+
+
+def run_hunter_search(request: SearchRequest, connection: Transport) -> dict:
+    """Always retain free email signals; key-based domain results are supplementary."""
+    records = []
+    warnings = []
+    notices = []
+    count = 0
+    webmail = False
+    completed = False
+    metadata = {}
+    headers = {"User-Agent": "h8mail-web-adapter"}
+    if request.query == "email" and request.page == 1:
+        try:
+            response = connection.request("https://api.hunter.io/v2/email-insight", headers=headers,
+                                          params={"email": request.target})
+            require(response.status_code == 200)
+            insight_records, webmail = hunter_insight(connection.responses[-1][2], request)
+            records.extend(insight_records)
+            count = 1
+            completed = True
+            notices.append("Free Email Insight completed. These are address and domain signals, not mailbox verification or breach records.")
+        except AdapterError as error:
+            warnings.append({**public_error(error.code),
+                             "message": "Hunter Email Insight: " + str(error)})
+    api_key = request.credentials["apiKey"]
+    if api_key and webmail:
+        notices.append("This address uses a public webmail provider. Domain Search was skipped because it searches business-domain contacts, not individual Gmail or Outlook inboxes.")
+    elif api_key:
+        try:
+            domain = request.target.rsplit("@", 1)[-1]
+            response = connection.request("https://api.hunter.io/v2/domain-search", headers=headers,
+                                          params={"domain": domain, "api_key": api_key, "limit": 10,
+                                                  "offset": (request.page - 1) * 10})
+            require(response.status_code == 200)
+            payload = connection.responses[-1][2]
+            require(isinstance(payload, dict) and isinstance(payload.get("data"), dict)
+                    and isinstance(payload.get("meta"), dict))
+            emails = payload["data"].get("emails")
+            require(isinstance(emails, list) and all(isinstance(email, dict)
+                    and isinstance(email.get("value"), str) for email in emails))
+            total = nonnegative_integer(payload["meta"].get("results"))
+            require(total >= len(emails))
+            records.extend(record("HUNTER_DOMAIN_SEARCH", "related_email", email["value"], request)
+                           for email in emails[:MAX_RECORDS - len(records)])
+            count += total
+            completed = True
+            metadata.update(total=total, hasMore=bool(emails) and request.page * 10 < total,
+                            truncated=total > 10_000 or len(records) >= MAX_RECORDS)
+            notices.append(f"Domain Search reports {total} related business-domain email addresses. This does not search breach records or leaked passwords.")
+        except AdapterError as error:
+            warnings.append({**public_error(error.code),
+                             "message": "Hunter Domain Search: " + str(error)})
+    if not completed:
+        failure = warnings.pop(0) if warnings else public_error("provider_error")
+        response = result(request, [], 0, failure["code"], warnings=warnings)
+        response["error"] = failure
+        return response
+    return result(request, records, count, warnings=warnings, notice=" ".join(notices), **metadata)
+
+
 def run_search(request: SearchRequest, transport: Transport | None = None) -> dict:
     """Use only within a dedicated child process; CLI stdout is process-local."""
     if request.provider == "pwnedpasswords":
         return run_pwned_password_search(request, transport)
     connection = transport or Transport(request.provider)
     try:
+        if request.provider == "hunter":
+            return run_hunter_search(request, connection)
         with contextlib.redirect_stdout(DiscardOutput()), contextlib.redirect_stderr(DiscardOutput()), \
                 protect_session_boundary(connection):
             target = WebTarget(request, connection)

@@ -85,6 +85,9 @@ class ContractTests(unittest.TestCase):
             validate_request({**public_search_payload("hunter"), "credentials": {"apiKey": KEY}}, {"apiKey": KEY})
         request = validate_request(public_search_payload("hunter"), {"apiKey": KEY})
         self.assertEqual(request.credentials, {"apiKey": KEY})
+        with self.assertRaises(AdapterError) as raised:
+            validate_request(public_search_payload("hunter", query="domain", target="example.test"))
+        self.assertEqual(raised.exception.code, "provider_not_configured")
         for provider in ("hibp", "hibp_pastes", "snusbase"):
             with self.assertRaises(AdapterError):
                 validate_request(public_search_payload(provider))
@@ -159,6 +162,12 @@ class TransportTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def hunter_insight_response(self, target="analyst@example.test", webmail=False):
+        return SyntheticResponse({"data": {
+            "email": target, "gibberish": False, "pattern": True, "mx_records": True,
+            "disposable": False, "webmail": webmail, "webmail_allowed": None,
+        }})
+
     def run_provider(self, request, responses):
         transport = Transport(request.provider)
         transport.session.request = Mock(side_effect=responses)
@@ -232,18 +241,90 @@ class EngineTests(unittest.TestCase):
         self.assertIn({"source": "EMAILREP", "field": "references", "value": "5"}, response["records"])
 
     def test_hunter_reports_domain_count_and_related_addresses(self):
-        public_request = search_request("hunter")
+        public_request = search_request("hunter", query="domain", target="example.test")
         response, _ = self.run_provider(public_request, [SyntheticResponse({
             "data": {"emails": []}, "meta": {"results": 7},
         })])
         self.assertEqual(response["count"], 7)
         self.assertEqual(response["records"], [])
-        response, _ = self.run_provider(search_request("hunter"), [SyntheticResponse({
+        response, _ = self.run_provider(search_request("hunter", query="domain", target="example.test"), [SyntheticResponse({
             "data": {"emails": [{"value": "related@example.test"}]}, "meta": {"results": 3},
         })])
         self.assertEqual(response["count"], 3)
         self.assertFalse(response["hasMore"])
         self.assertEqual(response["records"][0]["value"], "related@example.test")
+
+    def test_hunter_with_key_keeps_free_insight_and_adds_domain_contacts(self):
+        response, calls = self.run_provider(search_request("hunter"), [
+            self.hunter_insight_response(),
+            SyntheticResponse({"data": {"emails": [{"value": "related@example.test"}]},
+                               "meta": {"results": 1}}),
+        ])
+        self.assertEqual(response["status"], "found")
+        self.assertEqual(response["count"], 2)
+        self.assertEqual(len(response["records"]), 6)
+        self.assertEqual({entry["source"] for entry in response["records"]},
+                         {"HUNTER_EMAIL_INSIGHT", "HUNTER_DOMAIN_SEARCH"})
+        self.assertEqual(calls.call_args_list[0].kwargs["params"], {"email": "analyst@example.test"})
+        self.assertEqual(calls.call_args_list[1].kwargs["params"]["api_key"], KEY)
+
+    def test_hunter_webmail_with_key_preserves_free_signals_without_domain_search(self):
+        response, calls = self.run_provider(search_request("hunter", target="synthetic@gmail.com"), [
+            self.hunter_insight_response("synthetic@gmail.com", webmail=True),
+        ])
+        self.assertEqual(response["status"], "found")
+        self.assertEqual(len(response["records"]), 5)
+        self.assertEqual(response["count"], 1)
+        self.assertIn("public webmail provider", response["notice"])
+        self.assertIn("Domain Search was skipped", response["notice"])
+        self.assertFalse(response["hasMore"])
+        self.assertEqual(calls.call_count, 1)
+        self.assertNotIn("api_key", calls.call_args.kwargs["params"])
+
+    def test_hunter_empty_domain_results_do_not_erase_free_signals(self):
+        response, _ = self.run_provider(search_request("hunter"), [
+            self.hunter_insight_response(),
+            SyntheticResponse({"data": {"emails": []}, "meta": {"results": 0}}),
+        ])
+        self.assertEqual(response["status"], "found")
+        self.assertEqual(len(response["records"]), 5)
+        self.assertEqual(response["total"], 0)
+        self.assertIn("0 related business-domain email addresses", response["notice"])
+
+    def test_hunter_domain_failures_preserve_free_signals_and_report_warnings(self):
+        for status, payload, code in ((401, {}, "invalid_credentials"),
+                                      (429, {}, "rate_limited"),
+                                      (503, {}, "provider_error"),
+                                      (200, {"data": {}}, "protocol_error")):
+            with self.subTest(status=status, code=code):
+                response, _ = self.run_provider(search_request("hunter"), [
+                    self.hunter_insight_response(), SyntheticResponse(payload, status),
+                ])
+                self.assertEqual(response["status"], "found")
+                self.assertEqual(response["count"], 1)
+                self.assertEqual(len(response["records"]), 5)
+                self.assertEqual(response["warnings"][0]["code"], code)
+                self.assertTrue(response["warnings"][0]["message"].startswith("Hunter Domain Search:"))
+                self.assertNotIn(KEY, json.dumps(response))
+
+    def test_hunter_insight_failure_preserves_successful_domain_search(self):
+        response, _ = self.run_provider(search_request("hunter"), [
+            SyntheticResponse({}, 503),
+            SyntheticResponse({"data": {"emails": [{"value": "related@example.test"}]},
+                               "meta": {"results": 1}}),
+        ])
+        self.assertEqual(response["status"], "found")
+        self.assertEqual(response["records"][0]["field"], "related_email")
+        self.assertTrue(response["warnings"][0]["message"].startswith("Hunter Email Insight:"))
+
+    def test_hunter_total_failure_is_an_error_rather_than_no_matches(self):
+        response, _ = self.run_provider(search_request("hunter"), [
+            SyntheticResponse({}, 503), SyntheticResponse({}, 401),
+        ])
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["error"]["code"], "provider_error")
+        self.assertEqual(response["warnings"][0]["code"], "invalid_credentials")
+        self.assertEqual(response["records"], [])
 
     def test_hunter_uses_anonymous_email_insight_without_provider_key(self):
         target = "analyst@example.test"
@@ -257,7 +338,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(response["status"], "found")
         self.assertEqual(response["count"], 1)
         self.assertEqual(response["records"][0]["field"], "gibberish")
-        self.assertIn("does not search breach records", response["notice"])
+        self.assertIn("not mailbox verification or breach records", response["notice"])
 
     def test_pwned_password_lookup_never_sends_the_full_password(self):
         request = validate_request(public_search_payload(
@@ -429,7 +510,7 @@ class EngineTests(unittest.TestCase):
             if provider["available"] and not provider.get("apiRoute"):
                 query = "password" if "password" in provider["queryTypes"] else "email"
                 request = search_request(provider["id"], query=query)
-                response, _ = self.run_provider(request, [SyntheticResponse({})])
+                response, _ = self.run_provider(request, [SyntheticResponse({})] * (2 if provider["id"] == "hunter" else 1))
                 self.assertEqual(response["status"], "error", provider["id"])
                 self.assertEqual(response["error"]["code"], "protocol_error")
 
@@ -571,6 +652,24 @@ class HttpTests(unittest.TestCase):
         self.assertIn('"type":"unhandled_rejection"', logs.getvalue())
         self.assertNotIn("target", logs.getvalue())
         self.assertNotIn("stack", logs.getvalue())
+
+    def test_partial_provider_failures_are_logged_without_discarding_success(self):
+        private_target = "private-target@example.test"
+        request = search_request("hunter", target=private_target)
+        successful = result(request, [{"source": "HUNTER_EMAIL_INSIGHT", "field": "webmail", "value": "False"}],
+                            1, warnings=[{"code": "invalid_credentials", "message": "Hunter Domain Search: Check your API key."}])
+        logs = io.StringIO()
+        with patch.dict(os.environ, {"HUNTER_API_KEY": KEY}), patch(
+            "api.index.execute_search", return_value=successful
+        ), redirect_stderr(logs):
+            status, _, response = self.request("POST", "/api/search", public_search_payload("hunter", target=private_target))
+        self.assertEqual(status, 200)
+        self.assertEqual(response["status"], "found")
+        self.assertEqual(logs.getvalue().count('"event":"api_error"'), 1)
+        self.assertIn('"code":"invalid_credentials"', logs.getvalue())
+        self.assertIn('"provider":"hunter"', logs.getvalue())
+        self.assertNotIn(private_target, logs.getvalue())
+        self.assertNotIn(KEY, logs.getvalue())
 
     def test_browser_provider_request_errors_are_logged_without_lookup_data(self):
         logs = io.StringIO()

@@ -6,7 +6,7 @@ const providers = [
     { id: 'hibp', name: 'Have I Been Pwned', available: true, queryTypes: ['email'], credentialFields: [{ key: 'apiKey', required: true, configured: true }] },
     { id: 'intelx', name: 'Intelligence X', available: true, queryTypes: ['email', 'selector'], credentialFields: [{ key: 'apiKey', required: true, configured: true }] },
     { id: 'snusbase', name: 'Snusbase', available: true, queryTypes: ['email', 'password'], credentialFields: [{ key: 'apiKey', required: true, configured: false }] },
-    { id: 'hunter', name: 'Hunter', available: true, queryTypes: ['email'], freeQueryTypes: ['email'], credentialFields: [{ key: 'apiKey', required: true, configured: false }] },
+    { id: 'hunter', name: 'Hunter', available: true, queryTypes: ['email', 'domain'], freeQueryTypes: ['email'], credentialFields: [{ key: 'apiKey', required: true, configured: false }] },
     { id: 'pwnedpasswords', name: 'HIBP Pwned Passwords', available: true, queryTypes: ['password'], freeQueryTypes: ['password'] },
     { id: 'scylla', name: 'Scylla', available: false, queryTypes: ['email'] },
 ];
@@ -28,5 +28,13 @@ describe('aggregate provider search plan', () => {
     it('keeps password checking available without a provider key', () => {
         const plan = makeProviderSearchPlan(['synthetic-candidate'], providers, 'password');
         assert.deepEqual(plan.map(({ provider }) => provider.id), ['pwnedpasswords']);
+    });
+
+    it('requires the Hunter key for direct domain searches', () => {
+        assert.deepEqual(makeProviderSearchPlan(['example.test'], providers, 'domain'), []);
+        const configured = providers.map((provider) => provider.id === 'hunter'
+            ? { ...provider, credentialFields: [{ key: 'apiKey', required: true, configured: true }] }
+            : provider);
+        assert.deepEqual(makeProviderSearchPlan(['example.test'], configured, 'domain').map(({ provider }) => provider.id), ['hunter']);
     });
 });

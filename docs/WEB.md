@@ -63,8 +63,13 @@ response padding; only the first five characters of a SHA-1 hash are sent to
 HIBP. Providers requiring keys are skipped automatically and do not appear as
 lookup failures. Configured providers join the same aggregate search.
 
-Hunter's API key is optional for Email Insight and enables its separate
-domain-search endpoint for related addresses. HIBP email-breach and paste
+Every email lookup keeps Hunter Email Insight active, even when
+`HUNTER_API_KEY` is configured. The key adds its separate Domain Search for
+business-domain contacts and enables direct domain queries. When Email Insight
+identifies a public webmail provider, Domain Search is skipped; searching a
+domain such as `gmail.com` is not an individual inbox search. A failed or empty
+Domain Search does not erase successful free signals. Partial provider failures
+are shown as warnings and logged without targets or credentials. HIBP email-breach and paste
 searches require an API subscription key; its documented integration-test
 email is the only no-subscription exception. EmailRep anonymous access is
 disabled and new keys are not currently issued. IntelX's public instance is
